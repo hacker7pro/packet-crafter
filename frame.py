@@ -33,12 +33,15 @@ def ip_bytes(ip_str):
 
 
 def print_detailed(name, frame, fields, ops_count, ops_desc):
-    print(f"\n{'═' * 90}")
+    total_bytes = len(frame)
+    total_bits  = total_bytes * 8
+
+    print(f"\n{'═' * 100}")
     print(f" {name.upper()}")
-    print(f"{'═' * 90}")
-    print(f"Total length : {len(frame)} bytes ({len(frame)*8} bits)")
-    print(f"Main operations / types : {ops_count}")
-    print(f"  → {ops_desc}\n")
+    print(f"{'═' * 100}")
+    print(f"  TOTAL FRAME SIZE: {total_bytes} bytes  ({total_bits} bits)")
+    print(f"  Main operations / message types: {ops_count}")
+    print(f"    → {ops_desc}\n")
 
     offset = 0
     for fname, flen, fbytes, human in fields:
@@ -50,18 +53,20 @@ def print_detailed(name, frame, fields, ops_count, ops_desc):
         print(line)
         offset += flen
 
-    print(f"{'─' * 90}")
+    print(f"{'─' * 100}")
 
-    # Two styles of full hex dump
     hex_gapped = ' '.join(f"{b:02x}" for b in frame)
     hex_nogap  = ''.join(f"{b:02x}" for b in frame)
 
-    print("Full hex dump (with gaps / spaces between bytes):")
+    print(f"Full hex dump (with spaces / gaps) – total {total_bytes} bytes:")
     print(hex_gapped)
     print()
 
-    print("Full hex dump (without gaps / continuous string):")
+    print(f"Full hex dump (continuous / no gaps) – total {total_bytes} bytes:")
     print(hex_nogap)
+    print()
+
+    print(f"→ Final length confirmation: {len(frame)} bytes")
     print()
 
 
@@ -116,7 +121,7 @@ def create_arp():
 
 
 # ────────────────────────────────────────────────
-# STP / RSTP
+# STP / RSTP BPDU
 # ────────────────────────────────────────────────
 
 def create_stp():
@@ -195,9 +200,9 @@ def create_dtp():
     snap = bytes.fromhex("00000c 0104")
 
     payload = (
-        b"\x01" +               # version
-        b"\x03" +               # status
-        b"\x01" +               # trunk type 802.1Q
+        b"\x01" +
+        b"\x03" +
+        b"\x01" +
         hex_bytes(mode, 1) +
         b"\x00" * 26
     )
