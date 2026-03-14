@@ -27,13 +27,19 @@ LAYER_TAG = {
 #  UTILITIES
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def get(prompt, default=""):
-    """Simple prompted input with default."""
+def get(prompt, default="", help=""):
+    """Simple prompted input with default. Optional help shown before prompt."""
+    if help:
+        for line in help.strip().split("\n"):
+            print(f"      ┆ {line}")
     val = input(f"    {prompt} [{default}]: ").strip()
     return val if val else default
 
-def get_hex(prompt, default_hex, byte_len=None):
-    """Prompt for hex bytes, validate length."""
+def get_hex(prompt, default_hex, byte_len=None, help=""):
+    """Prompt for hex bytes, validate length. Optional help shown before prompt."""
+    if help:
+        for line in help.strip().split("\n"):
+            print(f"      ┆ {line}")
     while True:
         raw = input(f"    {prompt} [{default_hex}]: ").strip().lower()
         if not raw:
@@ -437,8 +443,15 @@ def ask_serial_crc(crc_input_bytes, crc_type, byte_order='big'):
 def ask_layer1_eth():
     """Preamble + SFD for Ethernet."""
     section("LAYER 1 — Physical (Preamble + SFD)")
-    preamble = get_hex("Preamble  7 bytes (14 hex)", "55555555555555", 7)
-    sfd      = get_hex("SFD       1 byte  ( 2 hex)", "d5", 1)
+    preamble = get_hex("Preamble  7 bytes (14 hex)", "55555555555555", 7,
+        help="7 bytes of 0x55 transmitted before every Ethernet frame.\n"
+             "Purpose: allows receiver hardware to synchronise its clock to the sender.\n"
+             "Always 55 55 55 55 55 55 55 — changing this breaks clock recovery.")
+    sfd = get_hex("SFD       1 byte  ( 2 hex)", "d5", 1,
+        help="Start Frame Delimiter — 1 byte, always 0xD5 (10101011 in binary).\n"
+             "Purpose: marks the EXACT boundary where the MAC frame begins.\n"
+             "The receiver looks for 0xD5 after the preamble to start decoding.\n"
+             "Changing this means no Ethernet NIC will recognise the frame.")
     return preamble, sfd
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -460,33 +473,68 @@ def ask_l2_ethernet(ethertype_hint="0800"):
     print("      4 = IEEE 802.3 + LLC + SNAP")
     v = input("    Select variant [1]: ").strip() or '1'
 
-    dst = get("Destination MAC", "ff:ff:ff:ff:ff:ff")
-    src = get("Source MAC",      "00:11:22:33:44:55")
+    dst = get("Destination MAC", "ff:ff:ff:ff:ff:ff",
+        help="6-byte MAC address of the RECEIVER of this frame.\n"
+             "ff:ff:ff:ff:ff:ff = broadcast (all devices on segment receive it).\n"
+             "Used by ARP, DHCP discover, STP — any frame for unknown/all targets.\n"
+             "For unicast set to peer's actual MAC (e.g. 00:1A:2B:3C:4D:5E).")
+    src = get("Source MAC", "00:11:22:33:44:55",
+        help="6-byte MAC address of the SENDER (your interface).\n"
+             "Must be your NIC's hardware address — used by the receiver to reply.\n"
+             "First 3 bytes = OUI (manufacturer ID), last 3 = device serial.\n"
+             "bit0 of byte0 = 1 means multicast source (invalid for normal frames).\n"
+             "bit1 of byte0 = 1 means locally-administered (overriding factory MAC).")
 
     llc_b = b''; snap_b = b''
 
     if v == '1':
-        et = get_hex(f"EtherType (4 hex)", ethertype_hint, 2)
+        et = get_hex(f"EtherType (4 hex)", ethertype_hint, 2,
+            help="2-byte protocol identifier telling the receiver what's inside the frame.\n"
+                 "0x0800 = IPv4   0x0806 = ARP   0x86DD = IPv6   0x8100 = VLAN tag\n"
+                 "0x8808 = MAC Control (Pause/PFC)   0x8809 = LACP   0x88CC = LLDP\n"
+                 "Values >= 0x0600 = EtherType (Ethernet II).\n"
+                 "Values < 0x0600 = 802.3 Length field (number of payload bytes).")
         variant_name = "Ethernet II"
         type_len_b = et
     elif v == '2':
         variant_name = "IEEE 802.3 Raw"
-        type_len_b = None   # computed after payload known
+        type_len_b = None
     elif v == '3':
         variant_name = "IEEE 802.3 + LLC"
-        dsap = get_hex("DSAP (2 hex)", "42", 1)
-        ssap = get_hex("SSAP (2 hex)", "42", 1)
-        ctl  = get_hex("Control (2 hex)", "03", 1)
+        dsap = get_hex("DSAP (2 hex)", "42", 1,
+            help="Destination Service Access Point — 1 byte, identifies upper-layer protocol.\n"
+                 "0x42 = STP/RSTP   0xAA = SNAP (use when you need EtherType inside 802.3)\n"
+                 "0xFE = ISO Network Layer   0x00 = Null SAP")
+        ssap = get_hex("SSAP (2 hex)", "42", 1,
+            help="Source Service Access Point — 1 byte, same encoding as DSAP.\n"
+                 "Identifies the sending protocol layer.  Usually matches DSAP.\n"
+                 "0x42 = STP   0xAA = SNAP   0xFE = ISO")
+        ctl  = get_hex("Control (2 hex)", "03", 1,
+            help="LLC Control field — 1 byte (UI frame) or 2 bytes (I-frame/S-frame).\n"
+                 "0x03 = UI (Unnumbered Information) — most common, connectionless.\n"
+                 "0x7F = XID   0xE3 = TEST   Other values = numbered I/S frames.")
         llc_b = dsap + ssap + ctl
         type_len_b = None
     elif v == '4':
         variant_name = "IEEE 802.3 + LLC + SNAP"
-        dsap = get_hex("DSAP (2 hex, SNAP=aa)", "aa", 1)
-        ssap = get_hex("SSAP (2 hex, SNAP=aa)", "aa", 1)
-        ctl  = get_hex("Control (2 hex)", "03", 1)
+        dsap = get_hex("DSAP (2 hex, SNAP=aa)", "aa", 1,
+            help="For LLC+SNAP frames, DSAP must be 0xAA (SNAP indicator).\n"
+                 "This tells the receiver that a 5-byte SNAP header follows the LLC header.")
+        ssap = get_hex("SSAP (2 hex, SNAP=aa)", "aa", 1,
+            help="For LLC+SNAP frames, SSAP must be 0xAA (SNAP indicator).\n"
+                 "Same as DSAP — both 0xAA signals SNAP encapsulation.")
+        ctl  = get_hex("Control (2 hex)", "03", 1,
+            help="LLC Control = 0x03 (UI frame) for SNAP encapsulation.\n"
+                 "Keep as 0x03 for normal data — other values are for LLC link management.")
         llc_b = dsap + ssap + ctl
-        oui  = get_hex("SNAP OUI (6 hex)", "000000", 3)
-        pid  = get_hex("SNAP Protocol ID (4 hex)", ethertype_hint, 2)
+        oui  = get_hex("SNAP OUI (6 hex)", "000000", 3,
+            help="SNAP Organisationally Unique Identifier — 3 bytes.\n"
+                 "0x000000 = Ethernet-bridged (most common — use with standard EtherTypes).\n"
+                 "0x00000C = Cisco proprietary   0x080007 = AppleTalk")
+        pid  = get_hex("SNAP Protocol ID (4 hex)", ethertype_hint, 2,
+            help="SNAP Protocol ID — same as EtherType when OUI=0x000000.\n"
+                 "0x0800=IPv4  0x0806=ARP  0x86DD=IPv6  0x8100=VLAN\n"
+                 "This field lets 802.3 frames carry any protocol that Ethernet II can.")
         snap_b = oui + pid
         type_len_b = None
     else:
@@ -534,15 +582,44 @@ def ask_l2_serial():
 
 def ask_l3_arp():
     section("LAYER 3 — ARP")
-    hw_type    = get("Hardware Type (1=Ethernet)", "1")
-    proto_type = get("Protocol Type hex (0800=IPv4)", "0800")
-    hw_len     = get("HW Address Length", "6")
-    proto_len  = get("Protocol Address Length", "4")
-    opcode     = get("Opcode  1=Request  2=Reply", "1")
-    sender_ha  = get("Sender MAC", "00:11:22:33:44:55")
-    sender_pa  = get("Sender IP",  "192.168.1.10")
-    target_ha  = get("Target MAC", "00:00:00:00:00:00")
-    target_pa  = get("Target IP",  "192.168.1.100")
+    hw_type    = get("Hardware Type (1=Ethernet)", "1",
+        help="Identifies the link-layer (hardware) address type.\n"
+             "1 = Ethernet (most common)   6 = IEEE 802 networks   15 = Frame Relay\n"
+             "Wrong value: receiver discards the ARP or misinterprets addresses.")
+    proto_type = get("Protocol Type hex (0800=IPv4)", "0800",
+        help="Same as EtherType — identifies the network-layer protocol.\n"
+             "0800 = IPv4 (standard)   86DD = IPv6   8100 = VLAN\n"
+             "This tells ARP what kind of network address (IP) is being resolved.")
+    hw_len     = get("HW Address Length", "6",
+        help="Length of hardware (MAC) addresses in this packet, in bytes.\n"
+             "6 = Ethernet MAC address (always 6 for Ethernet).\n"
+             "Wrong value: receiver won't know where sender/target MACs end.")
+    proto_len  = get("Protocol Address Length", "4",
+        help="Length of network (IP) addresses in this packet, in bytes.\n"
+             "4 = IPv4 address (always 4 for IPv4).   16 = IPv6 address.\n"
+             "Wrong value: receiver reads wrong bytes as the IP address.")
+    opcode     = get("Opcode  1=Request  2=Reply", "1",
+        help="ARP operation code.\n"
+             "1 = Request  — 'Who has IP X? Tell IP Y' (broadcast, target MAC = 00:00..)\n"
+             "2 = Reply    — 'IP X is at MAC AA:BB:CC:DD:EE:FF' (unicast reply)\n"
+             "3 = RARP Request   4 = RARP Reply (reverse ARP, rarely used today)")
+    sender_ha  = get("Sender MAC", "00:11:22:33:44:55",
+        help="MAC address of the device SENDING this ARP frame.\n"
+             "In a Request: your own MAC.   In a Reply: your own MAC.\n"
+             "Receiver uses this to update its ARP cache (IP→MAC mapping).")
+    sender_pa  = get("Sender IP",  "192.168.1.10",
+        help="IP address of the device SENDING this ARP frame (your IP).\n"
+             "In a Request: your own IP.   In a Reply: your own IP.\n"
+             "Gratuitous ARP: sender IP = target IP (announces your own IP).")
+    target_ha  = get("Target MAC", "00:00:00:00:00:00",
+        help="MAC address of the TARGET device.\n"
+             "In a Request: 00:00:00:00:00:00 (unknown — that's why we're asking!).\n"
+             "In a Reply: the MAC of the device that sent the original request.")
+    target_pa  = get("Target IP",  "192.168.1.100",
+        help="IP address you want to resolve to a MAC address.\n"
+             "In a Request: the IP whose MAC you want to find.\n"
+             "In a Reply: the IP of the original requester.\n"
+             "Must match the IP being queried — receiver ignores non-matching replies.")
     return (hw_type, proto_type, hw_len, proto_len, opcode,
             sender_ha, sender_pa, target_ha, target_pa)
 
@@ -575,12 +652,37 @@ L3_PROTO_NAMES = {1:"ICMP", 6:"TCP", 17:"UDP", 41:"IPv6", 89:"OSPF", 47:"GRE"}
 
 def ask_l3_ipv4():
     section("LAYER 3 — IPv4")
-    src_ip  = get("Source IP",                  "192.168.1.10")
-    dst_ip  = get("Destination IP",             "192.168.1.20")
-    ttl     = get("TTL",                        "64")
-    ip_id   = get("Identification (decimal)",   "4660")
-    dscp    = get("DSCP/ECN (decimal, usu. 0)", "0")
-    df      = get("DF flag? (y/n)",             "y")
+    src_ip  = get("Source IP", "192.168.1.10",
+        help="IPv4 address of the SENDER of this packet.\n"
+             "Must be your interface's IP address (or spoofed for testing).\n"
+             "Used by receiver to send replies back to you.\n"
+             "Private ranges: 10.x.x.x / 172.16-31.x.x / 192.168.x.x")
+    dst_ip  = get("Destination IP", "192.168.1.20",
+        help="IPv4 address of the intended RECEIVER.\n"
+             "For unicast: target host's IP.   255.255.255.255 = limited broadcast.\n"
+             "Network broadcast: e.g. 192.168.1.255 (host bits all 1).\n"
+             "224.0.0.0–239.255.255.255 = multicast range.")
+    ttl     = get("TTL", "64",
+        help="Time To Live — decremented by 1 at each router hop.\n"
+             "Packet discarded when TTL reaches 0 (prevents routing loops).\n"
+             "64 = Linux/Mac default.   128 = Windows default.   255 = maximum.\n"
+             "Low TTL (e.g. 1) = traceroute trick to get ICMP Time Exceeded back.")
+    ip_id   = get("Identification (decimal)", "4660",
+        help="16-bit identifier for this packet (0–65535).\n"
+             "All fragments of the same original packet share the same ID.\n"
+             "Used with Fragment Offset to reassemble fragmented packets.\n"
+             "For non-fragmented packets, value is arbitrary (OS usually increments it).")
+    dscp    = get("DSCP/ECN (decimal, usu. 0)", "0",
+        help="Differentiated Services Code Point + ECN (6+2 bits = 1 byte).\n"
+             "DSCP controls QoS queuing priority in routers:\n"
+             "0=Best Effort  8=CS1(low)  40=CS5  46=EF(voice/VoIP)  48=CS6(routing)\n"
+             "ECN bits (low 2): 0=non-ECN  1/2=ECN-capable  3=Congestion Experienced")
+    df      = get("DF flag? (y/n)", "y",
+        help="Don't Fragment bit in the IP Flags field.\n"
+             "y = DF=1: routers MUST NOT fragment this packet.\n"
+             "    If packet is too large, router drops it and sends ICMP type 3 code 4.\n"
+             "    Required for Path MTU Discovery (PMTUD) to work correctly.\n"
+             "n = DF=0: routers may fragment if needed (legacy behaviour).")
     return src_ip, dst_ip, int(ttl), int(ip_id), int(dscp), df.lower().startswith('y'), 0
 
 def build_ipv4(l4_payload, src_ip, dst_ip, ttl, ip_id, dscp, df, proto_num):
@@ -618,19 +720,63 @@ def build_ipv4(l4_payload, src_ip, dst_ip, ttl, ip_id, dscp, df, proto_num):
 
 def ask_l3_stp():
     section("LAYER 3 — STP / RSTP BPDU")
-    version   = get("Version  0=STP  2=RSTP", "2")
-    bpdu_type = get("BPDU Type  00=Config  80=TCN", "00")
-    flags     = get("Flags (hex)", "00")
-    root_prio = get("Root Priority", "32768")
-    root_mac  = get("Root MAC",     "00:00:00:00:00:00")
-    path_cost = get("Root Path Cost", "0")
-    br_prio   = get("Bridge Priority", "32768")
-    br_mac    = get("Bridge MAC",      "00:11:22:33:44:55")
-    port_id   = get("Port ID (hex)",   "8001")
-    msg_age   = get("Message Age (sec)","0")
-    max_age   = get("Max Age (sec)",   "20")
-    hello     = get("Hello Time (sec)","2")
-    fwd_delay = get("Forward Delay (sec)","15")
+    version   = get("Version  0=STP  2=RSTP", "2",
+        help="BPDU protocol version.\n"
+             "0 = STP (802.1D original) — slow convergence, 30–50 seconds.\n"
+             "2 = RSTP (802.1w/802.1D-2004) — fast convergence, <1 second.\n"
+             "3 = MSTP (802.1s) — multiple spanning tree instances.")
+    bpdu_type = get("BPDU Type  00=Config  80=TCN", "00",
+        help="Type of BPDU message.\n"
+             "00 = Configuration BPDU — normal periodic hello from root/designated bridge.\n"
+             "80 = Topology Change Notification — alert that topology has changed.\n"
+             "02 = RSTP BPDU (used when version=2).")
+    flags     = get("Flags (hex)", "00",
+        help="8-bit flags field (more important in RSTP).\n"
+             "Bit 0: Topology Change   Bit 7: Topology Change Acknowledgment\n"
+             "RSTP adds bits 1-6: Proposal, Port Role (2b), Learning, Forwarding, Agreement.\n"
+             "0x00 = no flags set.   0x3C = RSTP Designated port, Learning+Forwarding.")
+    root_prio = get("Root Priority", "32768",
+        help="Priority component of the Root Bridge ID (0–61440, steps of 4096).\n"
+             "Bridge with LOWEST Bridge ID becomes Root Bridge.\n"
+             "Bridge ID = Priority(2B) + MAC(6B).  Lower priority = more likely to be root.\n"
+             "Default: 32768.   Set 4096 to force a switch to become root.")
+    root_mac  = get("Root MAC", "00:00:00:00:00:00",
+        help="MAC address component of the Root Bridge ID.\n"
+             "Together with Root Priority, uniquely identifies the root bridge.\n"
+             "Lower MAC wins ties in priority.  Set to the actual root switch's MAC.")
+    path_cost = get("Root Path Cost", "0",
+        help="Total accumulated cost of the path from THIS bridge to the Root Bridge.\n"
+             "0 = this bridge IS the root (or directly connected to root with 0 cost).\n"
+             "Cost depends on link speed: 100Mbps=19  1Gbps=4  10Gbps=2  100Gbps=1\n"
+             "Bridges use lowest path cost to choose which port faces the root.")
+    br_prio   = get("Bridge Priority", "32768",
+        help="Priority component of THIS bridge's own Bridge ID.\n"
+             "Used to elect Designated Bridge on each segment.\n"
+             "Same encoding as Root Priority (steps of 4096, default 32768).")
+    br_mac    = get("Bridge MAC", "00:11:22:33:44:55",
+        help="MAC address of THIS bridge (the switch sending this BPDU).\n"
+             "Together with Bridge Priority, forms the Bridge ID of the sender.")
+    port_id   = get("Port ID (hex)", "8001",
+        help="2-byte Port ID: Priority(1B, default 0x80) + Port Number(1B).\n"
+             "0x8001 = priority 128, port 1.   0x8002 = priority 128, port 2.\n"
+             "Used to break ties when two ports of same bridge connect to same segment.")
+    msg_age   = get("Message Age (sec)", "0",
+        help="Age of this BPDU since it was generated by the root bridge.\n"
+             "0 = generated by the root itself.   Incremented by 1 at each bridge hop.\n"
+             "When Message Age >= Max Age (20s), BPDU is discarded as stale.")
+    max_age   = get("Max Age (sec)", "20",
+        help="Maximum time a bridge stores a BPDU before discarding it (default 20s).\n"
+             "If no BPDU received within Max Age, bridge assumes root has failed.\n"
+             "Increasing this slows failover.  Decreasing speeds it up but risks instability.")
+    hello     = get("Hello Time (sec)", "2",
+        help="Interval between Configuration BPDUs sent by the Root Bridge (default 2s).\n"
+             "Root sends a hello every 2 seconds to prove it's still alive.\n"
+             "Reducing this speeds up failure detection but increases traffic.")
+    fwd_delay = get("Forward Delay (sec)", "15",
+        help="Time spent in Listening and Learning states before moving to Forwarding (default 15s).\n"
+             "Total transition time = 2 × Forward Delay = 30 seconds for classic STP.\n"
+             "Prevents temporary loops during topology changes.\n"
+             "RSTP replaces this with handshake-based fast transition (ignores this field).")
     return (version, bpdu_type, flags, root_prio, root_mac, path_cost,
             br_prio, br_mac, port_id, msg_age, max_age, hello, fwd_delay)
 
@@ -670,7 +816,13 @@ def build_stp(inputs):
 def ask_l3_dtp():
     section("LAYER 3 — DTP  (Dynamic Trunking Protocol)")
     print("    Modes:  02=desirable  03=auto  04=on  05=off")
-    mode = get("DTP Mode (hex)", "02")
+    mode = get("DTP Mode (hex)", "02",
+        help="DTP (Dynamic Trunking Protocol) port trunking mode.\n"
+             "02=desirable: actively tries to form a trunk with the other end.\n"
+             "03=auto: will become a trunk only if the other end is desirable/on.\n"
+             "04=on: unconditionally trunks (regardless of other end's mode).\n"
+             "05=off: unconditionally access port (no trunking).\n"
+             "Cisco proprietary — disable with 'switchport nonegotiate' for security.")
     return mode
 
 def build_dtp(mode):
@@ -695,7 +847,13 @@ def build_dtp(mode):
 def ask_l3_pagp():
     section("LAYER 3 — PAgP  (Port Aggregation Protocol)")
     print("    Port State flags: 0x01=Active 0x04=Consistent 0x05=Active+Consistent")
-    state = get("Port State (hex)", "05")
+    state = get("Port State (hex)", "05",
+        help="PAgP (Port Aggregation Protocol) port state bitmask.\n"
+             "0x01=Active: port is willing to form a channel.\n"
+             "0x04=Consistent: port parameters match the group.\n"
+             "0x05=Active+Consistent: normal operating state for channel member.\n"
+             "0x00=Inactive: port not participating in channel aggregation.\n"
+             "Cisco proprietary — IEEE equivalent is LACP (option 8).")
     return state
 
 def build_pagp(state):
@@ -720,9 +878,25 @@ def build_pagp(state):
 
 def ask_l3_lacp():
     section("LAYER 3 — LACP  (802.3ad Link Aggregation)")
-    actor_mac   = get("Actor System MAC",  "00:11:22:33:44:55")
-    actor_key   = get("Actor Key (hex)",   "0001")
-    actor_state = get("Actor State (hex)  [3d=Active+Short+Aggregating+Sync+Col+Dist]", "3d")
+    actor_mac   = get("Actor System MAC",  "00:11:22:33:44:55",
+        help="MAC address of THIS switch/NIC participating in LACP.\n"
+             "Forms part of the Actor System ID (Priority + MAC).\n"
+             "Used by the peer to uniquely identify this LACP participant.")
+    actor_key   = get("Actor Key (hex)",   "0001",
+        help="2-byte operational key — identifies which ports can be aggregated together.\n"
+             "Ports with the same key on the same system can form one LAG (bundle).\n"
+             "0x0001 = first aggregation group.   Different keys = different bundles.")
+    actor_state = get("Actor State (hex)  [3d=Active+Short+Aggregating+Sync+Col+Dist]", "3d",
+        help="8-bit LACP state flags for this actor port.\n"
+             "Bit 0: LACP Activity (1=Active, sends PDUs periodically)\n"
+             "Bit 1: LACP Timeout (1=Short 1s, 0=Long 30s)\n"
+             "Bit 2: Aggregation (1=can aggregate, 0=individual)\n"
+             "Bit 3: Synchronisation (1=in sync with partner)\n"
+             "Bit 4: Collecting (1=receiving frames from partner)\n"
+             "Bit 5: Distributing (1=sending frames to partner)\n"
+             "Bit 6: Defaulted (1=using default partner info)\n"
+             "Bit 7: Expired (1=partner info has expired)\n"
+             "0x3D = 00111101 = Active+Short+Aggregating+Sync+Collecting+Distributing")
     return actor_mac, actor_key, actor_state
 
 def build_lacp(actor_mac, actor_key, actor_state):
@@ -803,14 +977,31 @@ def print_icmp_table():
 def ask_l4_icmp():
     print_icmp_table()
     section("LAYER 4 — ICMP")
-    icmp_type = int(get("ICMP Type  (default=8 Echo Request)", "8"))
+    icmp_type = int(get("ICMP Type  (default=8 Echo Request)", "8",
+        help="ICMP message type — defines what kind of ICMP message this is.\n"
+             "8 = Echo Request (ping sent)   0 = Echo Reply (ping response)\n"
+             "3 = Destination Unreachable    11 = Time Exceeded (TTL expired)\n"
+             "5 = Redirect   12 = Parameter Problem\n"
+             "See the table above for all types and their codes."))
     if icmp_type in ICMP_TABLE:
         codes = ICMP_TABLE[icmp_type][1]
         code_hint = "  ".join(f"{c}={d}" for c,d in sorted(codes.items()))
         print(f"    Valid codes: {code_hint}")
-    icmp_code = int(get("ICMP Code", "0"))
-    icmp_id   = int(get("ICMP Identifier (decimal)", "1"))
-    icmp_seq  = int(get("ICMP Sequence   (decimal)", "1"))
+    icmp_code = int(get("ICMP Code", "0",
+        help="ICMP sub-code — gives more detail about the type.\n"
+             "For Echo Request/Reply (type 8/0): always 0 (only one code).\n"
+             "For Destination Unreachable (type 3): 0=net  1=host  3=port  4=frag-needed\n"
+             "For Time Exceeded (type 11): 0=TTL in transit  1=reassembly timeout"))
+    icmp_id   = int(get("ICMP Identifier (decimal)", "1",
+        help="16-bit identifier used to match Echo Requests with Echo Replies.\n"
+             "The ping tool usually sets this to the process ID (PID).\n"
+             "Receiver copies this value unchanged into the Echo Reply.\n"
+             "Allows multiple ping sessions to run simultaneously without confusion."))
+    icmp_seq  = int(get("ICMP Sequence   (decimal)", "1",
+        help="16-bit sequence number — incremented with each ping request sent.\n"
+             "Starts at 1, goes up: 1, 2, 3, ...\n"
+             "Receiver copies this into the Reply — sender matches reply to request.\n"
+             "Gaps in sequence numbers indicate lost packets."))
     print("    ICMP data payload hex  (default = ping pattern 'abcdefgh')")
     data_hex  = get("ICMP payload hex", "6162636465666768")
     try:
@@ -965,22 +1156,52 @@ def ask_l4_tcp(src_ip, dst_ip):
 
     print(f"\n    Building: {step_name}  —  {step_desc}")
 
-    src_port = int(get("Source Port",      "49152"))
-    dst_port = int(get("Destination Port", "80"))
+    src_port = int(get("Source Port", "49152",
+        help="TCP port number on the SENDER side (0–65535).\n"
+             "Ports 0–1023 = well-known (HTTP=80, HTTPS=443, SSH=22, DNS=53).\n"
+             "Ports 1024–49151 = registered.   49152–65535 = ephemeral (client picks random).\n"
+             "For a client connecting to a server, use a random ephemeral port (>49152)."))
+    dst_port = int(get("Destination Port", "80",
+        help="TCP port number on the RECEIVER side — identifies which service to reach.\n"
+             "80=HTTP  443=HTTPS  22=SSH  21=FTP  25=SMTP  53=DNS  3306=MySQL  5432=PG\n"
+             "Wrong port: connection refused (RST) or no response (firewall drop)."))
     pn = port_note(dst_port) or port_note(src_port)
     if pn: print(f"    -> Port note: {pn}")
 
-    seq_num  = int(get("Sequence Number  (ISN for SYN, else continuation)", "1000"))
-    ack_num  = int(get("Acknowledgement Number  (0 if SYN, else peer_seq+1)", "0" if step=='1' else "1001"))
-    data_off = 5     # header length = 5 * 4 = 20 bytes (no options)
+    seq_num  = int(get("Sequence Number  (ISN for SYN, else continuation)", "1000",
+        help="32-bit number identifying the position of this segment in the byte stream.\n"
+             "SYN (step 1): use a random ISN (Initial Sequence Number) — e.g. 1000.\n"
+             "After SYN: each segment's SeqNum = previous SeqNum + bytes sent.\n"
+             "Receiver uses this to reassemble data in order and detect duplicates."))
+    ack_num  = int(get("Acknowledgement Number  (0 if SYN, else peer_seq+1)",
+        "0" if step=='1' else "1001",
+        help="32-bit number = next SeqNum the sender EXPECTS from the peer.\n"
+             "Meaning: 'I have received everything up to ACK_NUM - 1.'\n"
+             "SYN (step 1): 0 (ACK flag not set, no data acknowledged yet).\n"
+             "SYN-ACK (step 2): peer_ISN + 1.   ACK (step 3): peer_ISN + 1.\n"
+             "Only valid when ACK flag is set in the flags field."))
+    data_off = 5
     flags_val = default_flags
     print(f"    TCP Flags (hex, default={default_flags:#04x} = {step_name})")
-    flags_in = get("Flags hex (Enter=default)", f"{default_flags:02x}")
+    flags_in = get("Flags hex (Enter=default)", f"{default_flags:02x}",
+        help="8-bit field where each bit enables a TCP control flag.\n"
+             "SYN=0x02  ACK=0x10  SYN+ACK=0x12  PSH=0x08  FIN=0x01  RST=0x04\n"
+             "URG=0x20  ECE=0x40  CWR=0x80\n"
+             "SYN: initiate connection.   ACK: acknowledge data.   FIN: close gracefully.\n"
+             "RST: abort connection immediately.   PSH: deliver data to app right away.\n"
+             "URG: urgent data present (pointer field matters).   ECE/CWR: congestion.")
     try:    flags_val = int(flags_in, 16)
     except: flags_val = default_flags
 
-    window   = int(get("Window Size (bytes)", "65535"))
-    urg_ptr  = int(get("Urgent Pointer      (0 unless URG set)", "0"))
+    window   = int(get("Window Size (bytes)", "65535",
+        help="16-bit receive buffer size — how many bytes the sender can send before waiting for ACK.\n"
+             "65535 = maximum without window scaling (RFC 7323 extends this).\n"
+             "Smaller value: receiver is telling sender to slow down (flow control).\n"
+             "0 = zero window — stop sending (receiver buffer is full)."))
+    urg_ptr  = int(get("Urgent Pointer      (0 unless URG set)", "0",
+        help="16-bit offset from SeqNum to the end of urgent data.\n"
+             "Only meaningful when URG flag is set — points to last urgent byte.\n"
+             "Almost never used in modern protocols. Keep 0 for normal frames."))
 
     # Optional data payload (for PSH+ACK)
     tcp_data = b''
@@ -1064,8 +1285,14 @@ def ask_l4_udp(src_ip, dst_ip):
     print("    UDP is connectionless – single datagram, no handshake.")
     print("    Common uses: DNS (53), DHCP (67/68), NTP (123), SNMP (161), TFTP (69)")
 
-    src_port = int(get("Source Port",      "49152"))
-    dst_port = int(get("Destination Port", "53"))
+    src_port = int(get("Source Port", "49152",
+        help="UDP port number on the SENDER side (0–65535).\n"
+             "Ephemeral range 49152–65535 for clients.  Well-known: 53=DNS 67/68=DHCP.\n"
+             "Unlike TCP, UDP has no connection — port just identifies the sending socket."))
+    dst_port = int(get("Destination Port", "53",
+        help="UDP port number on the RECEIVER — identifies which service to reach.\n"
+             "53=DNS  67=DHCP server  68=DHCP client  69=TFTP  123=NTP  161=SNMP\n"
+             "514=Syslog  520=RIP  1194=OpenVPN  5060=SIP"))
     pn = port_note(dst_port) or port_note(src_port)
     if pn: print(f"    -> Port note: {pn}")
 
@@ -1752,7 +1979,12 @@ def flow_hdlc():
     # ── Flags ──────────────────────────────────────────────────────────────────
     section("FLAGS  (frame delimiters)")
     print("    Standard HDLC flag = 0x7E.  Both start and end use same value.")
-    flag_hex = get("Flag byte (hex)", "7e")
+    flag_hex = get("Flag byte (hex)", "7e",
+        help="Frame delimiter — 1 byte, marks the start and end of every HDLC frame.\n"
+             "0x7E = 01111110 in binary — the standard HDLC flag.\n"
+             "Bit-stuffing inserts a 0 after every 5 consecutive 1-bits inside the frame\n"
+             "to prevent 0x7E appearing in the frame content.\n"
+             "Keep 0x7E unless working with a non-standard implementation.")
     try:    flag_b = bytes([int(flag_hex, 16) & 0xFF])
     except: flag_b = b'\x7E'
 
@@ -1773,13 +2005,24 @@ def flow_hdlc():
         print("\n    Window size / modulo:")
         print("      Modulo  8: N(S)/N(R) 0–7,   1-byte control  (basic HDLC)")
         print("      Modulo 128: N(S)/N(R) 0–127, 2-byte control  (extended HDLC / ISDN)")
-        mod128 = get("Use Modulo-128 extended control? (y/n)", "n").lower().startswith("y")
+        mod128 = get("Use Modulo-128 extended control? (y/n)", "n",
+            help="Modulo controls the sequence number range and control field size.\n"
+                 "Modulo-8:   1-byte control, window size up to 7 frames in flight.\n"
+                 "            Used in basic HDLC, Cisco HDLC, simple WAN links.\n"
+                 "Modulo-128: 2-byte control, window size up to 127 frames in flight.\n"
+                 "            Used in ISDN (LAPD/Q.921), X.25 (LAPB), high-throughput links.\n"
+                 "Choose 128 when you need large send windows or are building LAPD frames.").lower().startswith("y")
 
     # ── P/F bit ───────────────────────────────────────────────────────────────
     section("POLL/FINAL (P/F) BIT")
     print("    P=1 in a COMMAND means: 'respond now' (poll)")
     print("    F=1 in a RESPONSE means: 'this is my final response'")
-    pf = int(get("P/F bit (0 or 1)", "0")) & 1
+    pf = int(get("P/F bit (0 or 1)", "0",
+        help="Poll/Final bit — 1 bit in the control field.\n"
+             "In a COMMAND frame: P=1 = Poll — instructs the peer to respond immediately.\n"
+             "In a RESPONSE frame: F=1 = Final — this is the last response to a poll.\n"
+             "P=0 / F=0 = normal unsolicited frame (no immediate response required).\n"
+             "Example: Primary sends RR with P=1 (poll), Secondary responds with RR+F=1.")) & 1
 
     # ─────────────────────────────────────────────────────────────────────────
     if ftype == '1':
@@ -1788,8 +2031,17 @@ def flow_hdlc():
         print("    N(S) = Send Sequence Number (sequence of THIS frame)")
         print("    N(R) = Receive Sequence Number (acknowledges receipt up to N(R)-1)")
         ns_max = 127 if mod128 else 7
-        ns = int(get(f"N(S) Send Sequence  (0–{ns_max})", "0")) & (0x7F if mod128 else 0x7)
-        nr = int(get(f"N(R) Receive/ACK Seq (0–{ns_max})", "0")) & (0x7F if mod128 else 0x7)
+        ns = int(get(f"N(S) Send Sequence  (0–{ns_max})", "0",
+            help=f"N(S) — Send Sequence Number of THIS I-frame (0–{ns_max}).\n"
+                 "Identifies this frame's position in the outgoing sequence.\n"
+                 "Receiver checks N(S) matches what it expects; rejects out-of-order frames.\n"
+                 "After sending N(S)=7 (mod-8), next frame has N(S)=0 (wraps around).")) & (0x7F if mod128 else 0x7)
+        nr = int(get(f"N(R) Receive/ACK Seq (0–{ns_max})", "0",
+            help=f"N(R) — Receive Sequence Number / ACK (0–{ns_max}).\n"
+                 "Meaning: 'I have correctly received all frames up to N(R)-1.'\n"
+                 "Implicitly acknowledges the peer's frames — piggybacked ACK.\n"
+                 "Set to the SeqNum of the NEXT frame you expect from the peer.\n"
+                 "Example: peer sent frames 0,1,2 → set N(R)=3 to ACK all three.")) & (0x7F if mod128 else 0x7)
         ctrl_bytes = build_hdlc_control_i(ns, pf, nr, mod128)
         ctrl_note  = f"I-frame  N(S)={ns}  P/F={pf}  N(R)={nr}  {'mod-128' if mod128 else 'mod-8'}"
 
@@ -1812,7 +2064,13 @@ def flow_hdlc():
         s1s0 = (s1 << 1) | s0
 
         nr_max = 127 if mod128 else 7
-        nr = int(get(f"N(R) Receive/ACK Sequence (0–{nr_max})", "0")) & (0x7F if mod128 else 0x7)
+        nr = int(get(f"N(R) Receive/ACK Sequence (0–{nr_max})", "0",
+            help=f"N(R) — Receive/ACK sequence number for this S-frame (0–{nr_max}).\n"
+                 "Meaning: 'I have received everything up to N(R)-1 correctly.'\n"
+                 "RR with N(R)=5: ACKs frames 0–4, ready to receive frame 5.\n"
+                 "REJ with N(R)=3: frames 0–2 OK, retransmit from frame 3 onward.\n"
+                 "RNR with N(R)=5: ACKs 0–4, but STOP sending — buffer full.\n"
+                 "SREJ with N(R)=3: retransmit only frame 3 (everything else fine).")) & (0x7F if mod128 else 0x7)
         ctrl_bytes = build_hdlc_control_s(nr, pf, s1s0, mod128)
         ctrl_note  = f"S-frame  {s_mn}({s_desc.split('—')[0].strip()})  N(R)={nr}  P/F={pf}  {'mod-128' if mod128 else 'mod-8'}"
         info_bytes = b''
@@ -1859,7 +2117,14 @@ def flow_hdlc():
     section("FCS  (Frame Check Sequence)")
     print("    1 = CRC-16/CCITT  (2 bytes, standard HDLC, x^16+x^12+x^5+1)")
     print("    2 = CRC-32        (4 bytes, extended HDLC)")
-    fcs_mode = get("FCS type (1=CRC-16  2=CRC-32)", "1")
+    fcs_mode = get("FCS type (1=CRC-16  2=CRC-32)", "1",
+        help="Frame Check Sequence type — detects transmission errors.\n"
+             "1 = CRC-16/CCITT (2 bytes): standard HDLC, PPP, X.25, ISDN LAPD.\n"
+             "    Polynomial x^16+x^12+x^5+1 (0x1021), init=0xFFFF, stored LE.\n"
+             "    Covers: Address + Control + Information fields.\n"
+             "2 = CRC-32 (4 bytes): extended HDLC for high-reliability links.\n"
+             "    Same polynomial as Ethernet CRC-32 — stronger error detection.\n"
+             "    Used when payload > a few KB or when link quality is poor.")
 
     if fcs_mode == '2':
         crc_auto = crc32_eth(fcs_input)   # same polynomial
@@ -1887,7 +2152,12 @@ def flow_hdlc():
     section("BIT STUFFING  (transparent operation)")
     print("    HDLC uses bit-stuffing: after 5 consecutive 1-bits a 0 is inserted.")
     print("    This prevents 0x7E appearing inside the frame content.")
-    do_stuff = get("Apply bit-stuffing to content? (y/n)", "n").lower().startswith("y")
+    do_stuff = get("Apply bit-stuffing to content? (y/n)", "n",
+        help="Bit-stuffing ensures 0x7E never appears inside the frame content.\n"
+             "How it works: after every 5 consecutive 1-bits, insert a 0-bit.\n"
+             "The receiver removes the stuffed 0 — transparent to upper layers.\n"
+             "y = apply (correct for synchronous HDLC on physical serial lines).\n"
+             "n = skip (correct for async links, or when framing is done by the OS driver).").lower().startswith("y")
 
     # ── Assemble frame ────────────────────────────────────────────────────────
     inner = addr_bytes + ctrl_bytes + info_bytes + fcs_bytes
@@ -2250,12 +2520,26 @@ def ask_l2_pause():
     print("      0x00FF (255) = ~131 µs @ 1 GbE")
     print("      0xFFFF (65535) = Maximum pause")
 
-    link = get("Link speed for quanta display  1=100M  2=1G  3=10G  4=25G", "2")
+    link = get("Link speed for quanta display  1=100M  2=1G  3=10G  4=25G", "2",
+        help="Your link speed — used ONLY to calculate and display the pause duration.\n"
+             "Does not change the frame bytes — just shows you how long the pause lasts.\n"
+             "1 quanta = 512 bit-times at the link speed:\n"
+             "  100 Mbps → 1 quanta = 5.12 µs\n"
+             "  1 Gbps   → 1 quanta = 512 ns\n"
+             "  10 Gbps  → 1 quanta = 51.2 ns")
     speed_map = {'1':100e6,'2':1e9,'3':10e9,'4':25e9}
     speed_bps = speed_map.get(link, 1e9)
     speed_label = {'1':'100 Mbps','2':'1 Gbps','3':'10 Gbps','4':'25 Gbps'}.get(link,'1 Gbps')
 
-    quanta_hex = get("Pause Quanta  (hex, 0000–FFFF)", "00ff")
+    quanta_hex = get("Pause Quanta  (hex, 0000–FFFF)", "00ff",
+        help="THE key field of a Pause frame — 2 bytes (0x0000–0xFFFF).\n"
+             "Tells the peer how long to STOP transmitting.\n"
+             "Duration = Quanta × 512 bit-times at link speed.\n"
+             "0x0000 = Resume immediately (cancel a previous pause).\n"
+             "0x0001 = Minimal pause (512 bit-times).\n"
+             "0x0200 = 512 quanta ≈ 262 µs @ 1 Gbps (typical for 32 KB buffer).\n"
+             "0xFFFF = Maximum pause ≈ 33.5 ms @ 1 Gbps.\n"
+             "Rule of thumb: quanta = (buffer_bytes × 8) / 512")
     try:
         quanta_val = int(quanta_hex.replace("0x",""), 16) & 0xFFFF
     except:
@@ -2503,7 +2787,15 @@ def ask_l2_pfc():
     section("PFC CONTROL  —  Opcode 0x0101")
     print("    Priority Enable Vector: bitmask selecting which priorities to pause.")
     print("    Examples:  0x0020=P5(RoCE)  0x00E0=P5+P6+P7  0x00FF=all  0x0001=P0 only")
-    vec_hex = get("Priority Enable Vector (hex 0000-00FF)", "0020")
+    vec_hex = get("Priority Enable Vector (hex 0000-00FF)", "0020",
+        help="8-bit bitmask — each bit=1 means that priority queue is being PAUSED.\n"
+             "Bit 0 = Priority 0 (Best Effort)    Bit 4 = Priority 4 (Video Conf)\n"
+             "Bit 1 = Priority 1 (Background)     Bit 5 = Priority 5 (RoCE/iSCSI)\n"
+             "Bit 2 = Priority 2 (Video)          Bit 6 = Priority 6 (Net Control)\n"
+             "Bit 3 = Priority 3 (Critical Apps)  Bit 7 = Priority 7 (STP/LLDP)\n"
+             "0x0020 = 0b00100000 = pause only Priority 5 (RoCE/iSCSI lossless traffic).\n"
+             "0x00FF = pause all 8 priorities (same effect as basic Pause frame).\n"
+             "0x00E0 = pause P5+P6+P7 (storage + control traffic).")
     try:    vec_val = int(vec_hex.replace("0x",""), 16) & 0x00FF
     except: vec_val = 0x0020
 
@@ -2737,7 +3029,12 @@ def ask_l2_lldp():
     # ── Mandatory TLV 3: TTL ───────────────────────────────────────────────────
     section("TLV 3 — TTL  (mandatory)")
     print("    0=remove entry immediately   120=default   65535=maximum")
-    ttl_val = int(get("TTL (seconds)", "120")) & 0xFFFF
+    ttl_val = int(get("TTL (seconds)", "120",
+        help="Time To Live — how long neighbours keep this LLDP entry before discarding it.\n"
+             "120 = default (2 minutes) — enough for 4 missed 30-second hello intervals.\n"
+             "0   = remove this entry immediately (used when device is shutting down).\n"
+             "65535 = maximum — entry stays until manually cleared or device reboots.\n"
+             "If a device stops sending LLDP, neighbours age out the entry after TTL seconds.")) & 0xFFFF
     ttl_bytes = struct.pack("!H", ttl_val)
 
     # ── Optional TLVs ──────────────────────────────────────────────────────────
@@ -2950,16 +3247,36 @@ def ask_l2_vlan():
 
     section("802.1Q VLAN TAG")
     print("    TPID options:  0x8100=standard 802.1Q   0x88A8=Q-in-Q outer (802.1ad)")
-    tpid_hex = get("TPID (hex)", "8100")
+    tpid_hex = get("TPID (hex)", "8100",
+        help="Tag Protocol Identifier — 2 bytes, identifies this as a VLAN-tagged frame.\n"
+             "0x8100 = standard IEEE 802.1Q VLAN tag (used on most access/trunk ports).\n"
+             "0x88A8 = IEEE 802.1ad outer tag (S-Tag) for Provider/Metro Ethernet Q-in-Q.\n"
+             "0x9100 = Cisco/older proprietary Q-in-Q outer tag (legacy).\n"
+             "A frame without 0x8100 here is treated as untagged by 802.1Q-aware switches.")
     try:    tpid_val = int(tpid_hex.replace("0x",""), 16) & 0xFFFF
     except: tpid_val = 0x8100
 
     print("    PCP (Priority Code Point):  0=BestEffort  3=CritApps  5=Voice  7=NetCtrl")
-    pcp = int(get("PCP  (0-7)", "0")) & 0x7
+    pcp = int(get("PCP  (0-7)", "0",
+        help="Priority Code Point — 3 bits (0–7), sets CoS/QoS priority for this frame.\n"
+             "0=Best Effort (default)  1=Background  2=Excellent Effort  3=Critical Apps\n"
+             "4=Video (<100ms)  5=Voice (<10ms, VoIP RTP)  6=Internetwork Control  7=Network Control\n"
+             "Switches use PCP to determine which queue to place this frame in.\n"
+             "Higher number = higher priority = served first during congestion.")) & 0x7
     print("    DEI (Drop Eligible):  0=keep  1=may be dropped first during congestion")
-    dei = int(get("DEI  (0 or 1)", "0")) & 0x1
+    dei = int(get("DEI  (0 or 1)", "0",
+        help="Drop Eligible Indicator — 1 bit.\n"
+             "0 = this frame should be kept even under congestion (non-discard-eligible).\n"
+             "1 = this frame may be dropped FIRST when switch buffers are filling up.\n"
+             "Used with traffic policing — marked frames are sacrificed before unmarked ones.")) & 0x1
     print("    VID:  0=priority-only  1=native  2-4094=user VLANs  4095=reserved")
-    vid = int(get("VID  (0-4094)", "100")) & 0x0FFF
+    vid = int(get("VID  (0-4094)", "100",
+        help="VLAN Identifier — 12 bits (0–4094), assigns frame to a specific VLAN.\n"
+             "0    = priority-tagged only (frame carries PCP but belongs to native VLAN).\n"
+             "1    = default native VLAN (untagged ports usually belong to VLAN 1).\n"
+             "2–4094 = user-defined VLANs (assign different VLANs to different segments).\n"
+             "4095 = reserved, never used in practice.\n"
+             "Frames with the wrong VID are dropped at the switch port.")) & 0x0FFF
 
     tci = (pcp << 13) | (dei << 12) | vid
     print(f"    -> TCI = 0x{tci:04X}  (PCP={pcp}  DEI={dei}  VID={vid})")
@@ -3902,15 +4219,47 @@ def ask_wifi_frame():
         print("    Control frames: ToDS=0 FromDS=0 (fixed)")
     else:
         print("    0/0=IBSS  1/0=STA→AP(uplink)  0/1=AP→STA(downlink)  1/1=WDS")
-        to_ds   = int(get("ToDS   (0 or 1)", "1")) & 1
-        from_ds = int(get("FromDS (0 or 1)", "0")) & 1
+        to_ds   = int(get("ToDS   (0 or 1)", "1",
+            help="To Distribution System bit.\n"
+                 "1 = this frame is travelling TOWARD the AP / distribution system.\n"
+                 "Set to 1 when a client (STA) sends data UP to the AP.\n"
+                 "Controls which meaning Addr1/Addr2/Addr3 have — see table above.")) & 1
+        from_ds = int(get("FromDS (0 or 1)", "0",
+            help="From Distribution System bit.\n"
+                 "1 = this frame is coming FROM the AP / distribution system.\n"
+                 "Set to 1 when AP sends data DOWN to a client (STA).\n"
+                 "ToDS=1 + FromDS=1 = WDS/mesh bridge frame (AP to AP).")) & 1
 
-    more_frag = int(get("More Fragments (0/1)", "0")) & 1
-    retry     = int(get("Retry          (0/1)", "0")) & 1
-    pwr_mgmt  = int(get("Power Mgmt     (0/1)", "0")) & 1
-    more_data = int(get("More Data      (0/1)", "0")) & 1
-    protected = int(get("Protected Frame (0/1, 1=encrypted)", "0")) & 1
-    htc_order = int(get("+HTC/Order     (0/1)", "0")) & 1
+    more_frag = int(get("More Fragments (0/1)", "0",
+        help="More Fragments bit — used when a large frame is fragmented.\n"
+             "1 = more fragments of this frame follow (not the last fragment).\n"
+             "0 = this is the last (or only) fragment.\n"
+             "Fragment Number in Sequence Control identifies which fragment this is.")) & 1
+    retry     = int(get("Retry          (0/1)", "0",
+        help="Retry bit — set when retransmitting a frame that was not acknowledged.\n"
+             "1 = this is a RETRANSMISSION of a previously sent frame.\n"
+             "0 = first transmission.\n"
+             "Receiver uses this with SeqNum to detect and discard duplicates.")) & 1
+    pwr_mgmt  = int(get("Power Mgmt     (0/1)", "0",
+        help="Power Management bit — announces power state AFTER this frame.\n"
+             "1 = STA will enter power-save sleep mode after sending this frame.\n"
+             "0 = STA remains awake (active mode).\n"
+             "AP buffers frames for sleeping STAs and delivers them on PS-Poll.")) & 1
+    more_data = int(get("More Data      (0/1)", "0",
+        help="More Data bit — set by AP toward sleeping STAs.\n"
+             "1 = AP has more buffered frames waiting for this sleeping STA.\n"
+             "0 = no more buffered frames.\n"
+             "Sleeping STA uses this to decide whether to send another PS-Poll.")) & 1
+    protected = int(get("Protected Frame (0/1, 1=encrypted)", "0",
+        help="Protected Frame bit — indicates the frame body is encrypted.\n"
+             "1 = frame body is encrypted: WEP, TKIP (WPA), CCMP (WPA2), or GCMP (WPA3).\n"
+             "0 = frame body is in plaintext (open network or management frames).\n"
+             "Unencrypted data frames on a protected network = security misconfiguration.")) & 1
+    htc_order = int(get("+HTC/Order     (0/1)", "0",
+        help="+HTC/Order bit — has two meanings depending on frame type.\n"
+             "For QoS data frames: 1 = HT Control field (4 bytes) is present.\n"
+             "For non-QoS frames: 1 = frames must be delivered in order (legacy).\n"
+             "Set to 1 when using 802.11n/ac link adaptation or beamforming feedback.")) & 1
 
     fc_byte0 = (subtype_val << 4) | (type_bits << 2) | 0x00
     fc_byte1 = (to_ds | (from_ds<<1) | (more_frag<<2) | (retry<<3) |
@@ -3921,7 +4270,14 @@ def ask_wifi_frame():
     section("DURATION / ID  (2 bytes)")
     print("    NAV duration in microseconds (Network Allocation Vector).")
     print("    For ACK/CTS: time for remaining exchange.  PS-Poll: AID value.")
-    dur_val   = int(get("Duration µs  (0–32767) or AID for PS-Poll", "0")) & 0x7FFF
+    dur_val   = int(get("Duration µs  (0–32767) or AID for PS-Poll", "0",
+        help="Duration/ID field — 2 bytes, two different uses:\n"
+             "For most frames: NAV value in microseconds (0–32767).\n"
+             "  NAV = Network Allocation Vector — tells other STAs how long the\n"
+             "  medium will be busy (they defer transmission for this duration).\n"
+             "  RTS sets NAV = time for CTS+Data+ACK.  Data sets NAV = time for ACK.\n"
+             "For PS-Poll frames: Association ID (AID) of the sleeping station.\n"
+             "  AID = value assigned by AP when STA associated (1–2007).")) & 0x7FFF
     dur_bytes = struct.pack("<H", dur_val)
 
     # ── Address fields ─────────────────────────────────────────────────────────
@@ -3970,8 +4326,16 @@ def ask_wifi_frame():
     seq_ctrl_bytes = b''
     if ftype_ch != '2' or subtype_val in (0x08, 0x09):
         section("SEQUENCE CONTROL")
-        seq_num  = int(get("Sequence Number  (0–4095)", "100")) & 0xFFF
-        frag_num = int(get("Fragment Number  (0=unfragmented)", "0")) & 0xF
+        seq_num  = int(get("Sequence Number  (0–4095)", "100",
+            help="12-bit frame sequence number (0–4095, then wraps back to 0).\n"
+                 "Incremented by 1 for each new MSDU (data unit) sent.\n"
+                 "Receiver uses this to detect and discard duplicate retransmitted frames.\n"
+                 "Also used to reorder out-of-sequence frames in Block-Ack scenarios.")) & 0xFFF
+        frag_num = int(get("Fragment Number  (0=unfragmented)", "0",
+            help="4-bit fragment number (0–15) within the current sequence number.\n"
+                 "0 = unfragmented frame (or first/only fragment).\n"
+                 "1, 2, 3... = subsequent fragments of a large fragmented MSDU.\n"
+                 "Receiver reassembles fragments with same SeqNum in FragNum order.")) & 0xF
         seq_ctrl_val   = (seq_num << 4) | frag_num
         seq_ctrl_bytes = struct.pack("<H", seq_ctrl_val)
 
@@ -3981,12 +4345,36 @@ def ask_wifi_frame():
         section("QoS CONTROL")
         for tid,(name) in WIFI_TID_NAMES.items():
             print(f"      TID {tid} = {name}")
-        tid     = int(get("TID  Traffic ID (0–7)", "0")) & 0xF
-        eosp    = int(get("EOSP (0/1)", "0")) & 0x1
+        tid     = int(get("TID  Traffic ID (0–7)", "0",
+            help="Traffic Identifier — 4 bits, maps to 802.1D User Priority.\n"
+                 "0=BE(Best Effort)  1=BK(Background)  2=BK  3=BE\n"
+                 "4=VI(Video)  5=VI  6=VO(Voice)  7=VO\n"
+                 "Determines which AC (Access Category) queue this frame uses:\n"
+                 "AC_BK=background  AC_BE=best effort  AC_VI=video  AC_VO=voice\n"
+                 "Higher TID = higher priority = shorter backoff = wins medium sooner.")) & 0xF
+        eosp    = int(get("EOSP (0/1)", "0",
+            help="End Of Service Period — 1 bit, used in U-APSD (Unscheduled APSD) power save.\n"
+                 "1 = AP sets this in the LAST frame of a service period delivery.\n"
+                 "0 = normal frame (or not the last frame of a service period).\n"
+                 "STA enters sleep after receiving frame with EOSP=1.")) & 0x1
         print("    Ack Policy:  0=Normal  1=No-Ack  2=No-Explicit  3=Block-Ack")
-        ack_pol = int(get("Ack Policy (0–3)", "0")) & 0x3
-        amsdu   = int(get("A-MSDU Present (0/1)", "0")) & 0x1
-        txop    = int(get("TXOP Limit (0–255)", "0")) & 0xFF
+        ack_pol = int(get("Ack Policy (0–3)", "0",
+            help="Acknowledgment policy for this QoS frame.\n"
+                 "0=Normal ACK: receiver sends individual ACK for this frame.\n"
+                 "1=No ACK: no acknowledgment (used for multicast, video, lossy streams).\n"
+                 "2=No Explicit ACK / PSMP ACK: special power-save multi-poll mode.\n"
+                 "3=Block ACK: use Block-Ack agreement — ACK batched with bitmap.\n"
+                 "No ACK + Block ACK improve throughput at cost of reliability.")) & 0x3
+        amsdu   = int(get("A-MSDU Present (0/1)", "0",
+            help="Aggregate MSDU flag — 1 bit.\n"
+                 "1 = the frame body contains an A-MSDU (multiple MSDUs concatenated).\n"
+                 "0 = normal single MSDU payload.\n"
+                 "A-MSDU aggregation reduces per-frame overhead at cost of larger retry unit.")) & 0x1
+        txop    = int(get("TXOP Limit (0–255)", "0",
+            help="Transmit Opportunity limit — 8 bits.\n"
+                 "Set by AP in frames to STA: maximum TXOP duration (in 32µs units) the STA\n"
+                 "may use.  0 = one frame per TXOP (conservative).\n"
+                 "Higher values allow burst transmission, improving throughput.")) & 0xFF
         qos_lo  = tid | (eosp<<4) | (ack_pol<<5) | (amsdu<<7)
         qos_bytes = bytes([qos_lo, txop])
 
