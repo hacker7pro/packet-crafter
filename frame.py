@@ -4629,6 +4629,543 @@ MAIN_MENU = """
 ║   ║  Beacon | Probe | Auth | Assoc | RTS | CTS | ACK | Data | QoS | Null      ║
 ╚═══╩════════════════════════════════════════════════════════════════════════════╝"""
 
+# ═══════════════════════════════════════════════════════════════════════════════
+#  STANDALONE IP PACKET BUILDER  (L3 only — no Ethernet wrapper)
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+#  IPv4 HEADER STRUCTURE  (RFC 791)
+#  ─────────────────────────────────────────────────────────────────────────────
+#  Octet  Bits  Field               Description
+#  ─────  ────  ──────────────────  ──────────────────────────────────────────
+#    0      4   Version             Always 4 for IPv4
+#    0      4   IHL                 Header length in 32-bit words (min 5 = 20B)
+#    1      8   DSCP/ECN            QoS + congestion notification
+#    2     16   Total Length        Entire packet bytes (header + payload)
+#    4     16   Identification      Fragment group ID (0 for non-fragmented)
+#    6      3   Flags               DF (don't fragment), MF (more fragments)
+#    6     13   Fragment Offset     Offset of this fragment in 8-byte units
+#    8      8   TTL                 Hop limit (decremented by each router)
+#    9      8   Protocol            Upper layer: 1=ICMP 6=TCP 17=UDP 89=OSPF
+#   10     16   Header Checksum     One's complement of header (auto or manual)
+#   12     32   Source Address      Sender's IP
+#   16     32   Destination Address Receiver's IP
+#   20+    N    Options (optional)  Padding to reach IHL boundary
+#   IHL×4  …   Data / Payload      Upper-layer protocol data
+#  ─────────────────────────────────────────────────────────────────────────────
+#
+#  IP OPTIONS (when IHL > 5)
+#  ─────────────────────────────────────────────────────────────────────────────
+#  Option  Code  Description
+#  ──────  ────  ──────────────────────────────────────────────────────────────
+#  EOOL    0x00  End Of Option List — padding
+#  NOP     0x01  No Operation — 1-byte padding to align
+#  RR      0x07  Record Route — each router appends its IP
+#  TS      0x44  Internet Timestamp — each router appends time
+#  LSRR    0x83  Loose Source and Record Route — must visit listed IPs
+#  SSRR    0x89  Strict Source and Record Route — must visit exactly
+#  ─────────────────────────────────────────────────────────────────────────────
+#
+#  CHECKSUM CALCULATION  (RFC 791 — one's complement)
+#  ─────────────────────────────────────────────────────────────────────────────
+#  1. Set checksum field to 0x0000
+#  2. Sum all 16-bit words of the header
+#  3. Add carry bits back into the sum (fold carries)
+#  4. Take one's complement (~sum & 0xFFFF)
+#  5. Store result in checksum field
+#  Verification: sum all header words including checksum → result must be 0xFFFF
+# ═══════════════════════════════════════════════════════════════════════════════
+
+IP_PROTO_NAMES = {
+    0:  ("HOPOPT",  "IPv6 Hop-by-Hop Options"),
+    1:  ("ICMP",    "Internet Control Message Protocol"),
+    2:  ("IGMP",    "Internet Group Management Protocol"),
+    4:  ("IP-IP",   "IP-in-IP Encapsulation"),
+    6:  ("TCP",     "Transmission Control Protocol"),
+    17: ("UDP",     "User Datagram Protocol"),
+    41: ("IPv6",    "IPv6 Encapsulation"),
+    47: ("GRE",     "Generic Routing Encapsulation"),
+    50: ("ESP",     "Encapsulating Security Payload"),
+    51: ("AH",      "Authentication Header"),
+    58: ("ICMPv6",  "ICMP for IPv6"),
+    89: ("OSPF",    "Open Shortest Path First"),
+    103:("PIM",     "Protocol Independent Multicast"),
+    112:("VRRP",    "Virtual Router Redundancy Protocol"),
+    132:("SCTP",    "Stream Control Transmission Protocol"),
+}
+
+DSCP_TABLE = {
+    0:  ("CS0 / BE",  "Best Effort — default"),
+    8:  ("CS1",       "Scavenger / low-priority"),
+    10: ("AF11",      "Assured Forwarding low drop"),
+    12: ("AF12",      "Assured Forwarding med drop"),
+    14: ("AF13",      "Assured Forwarding high drop"),
+    16: ("CS2",       "OAM"),
+    18: ("AF21",      "AF class 2 low drop"),
+    20: ("AF22",      "AF class 2 med drop"),
+    22: ("AF23",      "AF class 2 high drop"),
+    24: ("CS3",       "Broadcast video"),
+    26: ("AF31",      "AF class 3 low drop"),
+    28: ("AF32",      "AF class 3 med drop"),
+    30: ("AF33",      "AF class 3 high drop"),
+    32: ("CS4",       "Real-time interactive"),
+    34: ("AF41",      "AF class 4 low drop"),
+    36: ("AF42",      "AF class 4 med drop"),
+    38: ("AF43",      "AF class 4 high drop"),
+    40: ("CS5",       "Signalling"),
+    46: ("EF",        "Expedited Forwarding — VoIP"),
+    48: ("CS6",       "Network control (routing)"),
+    56: ("CS7",       "Reserved"),
+}
+
+def print_ip_education():
+    print(f"""
+  {'═'*110}
+  {'STANDALONE IPv4 PACKET BUILDER  (RFC 791)':^110}
+  {'═'*110}
+
+  IPv4 HEADER MAP  (20 bytes minimum, up to 60 bytes with options)
+  ─────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Byte  Bits  Field               Fixed?  Value / Your Input
+  ────  ────  ──────────────────  ──────  ────────────────────────────────────────────────────────────────────
+   0    [7:4] Version             Fixed   4 = IPv4 (always)
+   0    [3:0] IHL                 Auto    Header length ÷ 4 (5 = 20B, 6 = 24B with options, max 15=60B)
+   1    [7:2] DSCP                USER    QoS marking — 0=best effort, 46=VoIP, 48=routing
+   1    [1:0] ECN                 USER    Congestion notification: 0=none, 3=CE (Congestion Experienced)
+   2-3         Total Length       Auto    Header + Payload in bytes (auto-calculated)
+   4-5         Identification     USER    16-bit ID for fragment group (0 for unfragmented OK)
+   6    [7]   Reserved flag       Fixed   Always 0
+   6    [6]   DF (Don't Fragment) USER    1=do not fragment this packet  0=fragmentation allowed
+   6    [5]   MF (More Fragments) USER    1=more fragments follow        0=last or only fragment
+   6-7  [12:0] Fragment Offset   USER    Position of this fragment in original packet (×8 bytes)
+   8           TTL                USER    Hop limit 0–255 (64=Linux, 128=Windows, 255=max)
+   9           Protocol           USER    Upper layer number (1=ICMP 6=TCP 17=UDP 89=OSPF ...)
+  10-11        Header Checksum    AUTO    RFC 791 one's complement — auto-calculated or manual
+  12-15        Source Address     USER    Your IP address
+  16-19        Destination Addr   USER    Target IP address
+  20+          Options            USER    Optional (NOP/RR/TS/LSRR/SSRR) — increases IHL
+  IHL×4+       Payload            USER    ICMP / TCP / UDP / raw hex / empty
+
+  CHECKSUM CALCULATION
+  ─────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  1. Build header with checksum field = 0x0000
+  2. Sum all 16-bit words across the 20-byte header
+  3. Fold carries: while sum > 0xFFFF: sum = (sum & 0xFFFF) + (sum >> 16)
+  4. One's complement: checksum = ~sum & 0xFFFF
+  Verify: sum all header words incl. checksum → must equal 0xFFFF (result = 0)
+
+  FRAGMENTATION
+  ─────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  All fragments share the same Identification value.
+  Fragment Offset = byte offset from start of original payload ÷ 8.
+  MF=1 on all fragments EXCEPT the last.  Last fragment: MF=0.
+  DF=1 prevents any fragmentation — router drops and sends ICMP type 3 code 4 back.
+
+  PROTOCOL NUMBERS (common)
+  ─────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  1=ICMP  2=IGMP  4=IP-in-IP  6=TCP  17=UDP  41=IPv6(tunnel)
+  47=GRE  50=ESP  51=AH  58=ICMPv6  89=OSPF  103=PIM  112=VRRP  132=SCTP
+  {'═'*110}""")
+
+
+def ask_ip_options():
+    """Ask whether to add IP options and build them."""
+    section("IP OPTIONS  (optional — extends header beyond 20 bytes)")
+    print("    IP options increase IHL. Each option has Type(1B)+Length(1B)+Data.")
+    print("    1 = No options  (IHL=5, 20-byte header — most common)")
+    print("    2 = NOP padding  (Type=0x01, 1 byte, used to align)")
+    print("    3 = Record Route (Type=0x07 — routers record their IPs)")
+    print("    4 = Timestamp    (Type=0x44 — routers record timestamps)")
+    print("    5 = Custom hex   (enter raw option bytes manually)")
+    opt_ch = get("Options choice", "1",
+        help="IP Options field — rarely used today but defined in RFC 791.\n"
+             "Adding options increases the header length (IHL field).\n"
+             "Most firewalls and routers DROP packets with IP options (security concern).\n"
+             "NOP(0x01): 1-byte pad to align subsequent options to 32-bit boundary.\n"
+             "Record Route(0x07): asks each router to record its outbound IP.\n"
+             "Timestamp(0x44): asks each router to append its time and IP.\n"
+             "LSRR(0x83)/SSRR(0x89): source routing — rarely allowed, often blocked.")
+
+    if opt_ch == '1':
+        return b'', []
+
+    elif opt_ch == '2':
+        count = int(get("How many NOP bytes (1–40)", "3",
+            help="NOP = Type 0x01, single byte.  Used to pad options to 32-bit alignment.\n"
+                 "Must pad so total options length is a multiple of 4 bytes."))
+        nop = bytes([0x01] * min(count, 40))
+        # pad to 4-byte boundary
+        if len(nop) % 4:
+            nop += bytes([0x00] * (4 - len(nop) % 4))
+        records = [{"layer":3,"name":f"IP Option NOP×{len(nop)}",
+                    "raw":nop,"user_val":f"{len(nop)}B","note":"0x01 padding"}]
+        return nop, records
+
+    elif opt_ch == '3':
+        # Record Route: Type(1B)=0x07  Length(1B)=3+4*slots  Pointer(1B)=4  Slots
+        slots = int(get("Number of route slots (1–9)", "4",
+            help="Number of IP address slots to reserve in the Record Route option.\n"
+                 "Each slot = 4 bytes (one IPv4 address).  Routers fill these in order.\n"
+                 "Max 9 slots — but most routers ignore/strip this option."))
+        slots = max(1, min(9, slots))
+        opt_len = 3 + slots * 4
+        rr = bytes([0x07, opt_len, 0x04]) + b'\x00' * (slots * 4)
+        # pad to 4-byte boundary
+        if len(rr) % 4:
+            rr += bytes([0x00] * (4 - len(rr) % 4))
+        records = [{"layer":3,"name":"IP Option Record Route",
+                    "raw":rr,"user_val":f"{slots} slots ({opt_len}B)",
+                    "note":f"Type=0x07 Len={opt_len} Ptr=4  {slots} empty slots"}]
+        return rr, records
+
+    elif opt_ch == '4':
+        # Timestamp: Type=0x44  Length=12(min)  Pointer=5  Overflow(4b)+Flag(4b)
+        print("    Timestamp flag:  0=timestamp only  1=IP+timestamp  3=prespecified IPs")
+        ts_flag = int(get("Timestamp flag (0/1/3)", "0",
+            help="0 = record timestamp only (4 bytes per slot).\n"
+                 "1 = record IP address + timestamp (8 bytes per slot).\n"
+                 "3 = only record for prespecified IP addresses.")) & 0xF
+        slots = int(get("Number of timestamp slots (1–4)", "2",
+            help="Number of timestamp entries to reserve.\n"
+                 "Each slot: flag=0 → 4 bytes; flag=1 → 8 bytes."))
+        slots = max(1, min(4, slots))
+        slot_size = 8 if ts_flag else 4
+        opt_len = 4 + slots * slot_size
+        ts_opt = bytes([0x44, opt_len, 5, ts_flag]) + b'\x00' * (slots * slot_size)
+        if len(ts_opt) % 4:
+            ts_opt += bytes([0x00] * (4 - len(ts_opt) % 4))
+        records = [{"layer":3,"name":"IP Option Timestamp",
+                    "raw":ts_opt,"user_val":f"{slots} slots flag={ts_flag}",
+                    "note":f"Type=0x44 Len={opt_len}"}]
+        return ts_opt, records
+
+    else:  # custom
+        print("    Enter raw option bytes in hex (will be padded to 4-byte boundary).")
+        opt_hex = get("Option bytes hex", "01010101",
+            help="Raw bytes of the IP option(s) in hex.\n"
+                 "Must be padded to a multiple of 4 bytes total.\n"
+                 "Example: 01 01 01 01 = four NOP bytes (valid 4-byte pad).\n"
+                 "Example: 07 0b 04 00 00 00 00 00 00 00 00 = Record Route 2 slots.")
+        try:    opt_bytes = bytes.fromhex(opt_hex.replace(" ",""))
+        except: opt_bytes = b'\x01\x01\x01\x01'
+        if len(opt_bytes) % 4:
+            opt_bytes += bytes([0x00] * (4 - len(opt_bytes) % 4))
+        if len(opt_bytes) > 40:
+            opt_bytes = opt_bytes[:40]
+            print("    -> truncated to 40 bytes (max IP options length)")
+        records = [{"layer":3,"name":"IP Option Custom",
+                    "raw":opt_bytes,"user_val":opt_bytes.hex()[:24],
+                    "note":f"{len(opt_bytes)}B"}]
+        return opt_bytes, records
+
+
+def ask_ip_payload():
+    """Ask what L4 payload to put inside the IP packet."""
+    section("IP PAYLOAD  (Layer 4 content)")
+    print("    1 = ICMP  (Echo Request/Reply/Unreachable/Time Exceeded ...)")
+    print("    2 = TCP   (SYN / SYN-ACK / ACK / PSH+ACK / FIN / RST)")
+    print("    3 = UDP   (DNS / NTP / SNMP / custom ...)")
+    print("    4 = Raw hex  (enter payload bytes directly)")
+    print("    5 = Empty    (IP header only, no payload)")
+    ch = get("Payload type", "1",
+        help="Choose what goes inside the IP packet after the header.\n"
+             "1=ICMP: ping, error messages, traceroute probes.\n"
+             "2=TCP: connection-oriented reliable transport (HTTP, SSH, FTP ...).\n"
+             "3=UDP: connectionless fast transport (DNS, NTP, SNMP, TFTP ...).\n"
+             "4=Raw: enter any hex bytes — for custom/proprietary protocols.\n"
+             "5=Empty: just the IP header with no payload (testing header-only).")
+    return ch
+
+
+def flow_ip_standalone():
+    banner("STANDALONE IPv4 PACKET BUILDER",
+           "RFC 791  |  Full header fields  |  Options  |  Auto or manual checksum  |  L4 payload")
+    print_ip_education()
+
+    # ── DSCP/ECN display ──────────────────────────────────────────────────────
+    section("DSCP / ECN REFERENCE")
+    print(f"  {'Value':>5}  {'DSCP Name':<12}  Description")
+    print(f"  {'─'*60}")
+    for val, (name, desc) in sorted(DSCP_TABLE.items()):
+        print(f"  {val:>5}  {name:<12}  {desc}")
+    print(f"  {'─'*60}")
+
+    # ── Protocol reference ─────────────────────────────────────────────────────
+    section("PROTOCOL NUMBER REFERENCE")
+    print(f"  {'Proto':>5}  {'Name':<8}  Description")
+    print(f"  {'─'*60}")
+    for num, (name, desc) in sorted(IP_PROTO_NAMES.items()):
+        print(f"  {num:>5}  {name:<8}  {desc}")
+    print(f"  {'─'*60}")
+
+    # ── IPv4 header fields ────────────────────────────────────────────────────
+    section("IPv4 HEADER FIELDS")
+
+    src_ip = get("Source IP", "192.168.1.10",
+        help="IPv4 address of the SENDER (your interface or spoofed for testing).\n"
+             "Used by receiver to send replies back.\n"
+             "Private: 10.x.x.x / 172.16–31.x.x / 192.168.x.x\n"
+             "Loopback: 127.0.0.1   Link-local: 169.254.x.x")
+
+    dst_ip = get("Destination IP", "192.168.1.20",
+        help="IPv4 address of the intended receiver.\n"
+             "Unicast: specific host.   255.255.255.255 = limited broadcast.\n"
+             "Network broadcast: e.g. 192.168.1.255.\n"
+             "Multicast: 224.0.0.0–239.255.255.255 (OSPF=224.0.0.5, PIM=224.0.0.13).")
+
+    ttl = int(get("TTL  (Time To Live)", "64",
+        help="Hop limit — decremented by 1 at each router. Packet dropped at 0.\n"
+             "Prevents routing loops.  64=Linux/Mac default.  128=Windows default.\n"
+             "Use 1 for traceroute-style probes (get ICMP Time Exceeded back).\n"
+             "Use 255 for link-local protocols (OSPF, VRRP) that must not be forwarded."))
+
+    # Protocol
+    print(f"\n    Common protocol numbers: 1=ICMP  6=TCP  17=UDP  47=GRE  89=OSPF  50=ESP")
+    proto_in = get("Protocol number", "1",
+        help="8-bit field identifying the upper-layer (L4) protocol inside this packet.\n"
+             "The receiver uses this to pass payload to the correct socket/handler.\n"
+             "Wrong value: OS silently discards payload (no matching socket).\n"
+             "Special: 59 = 'No next header' (IPv6 concept, IPv4: means no payload).")
+    try:    proto_num = int(proto_in) & 0xFF
+    except: proto_num = 1
+
+    proto_name = IP_PROTO_NAMES.get(proto_num, (str(proto_num), "Unknown"))[0]
+    print(f"    -> Protocol: {proto_num} = {proto_name}")
+
+    ip_id = int(get("Identification  (0–65535)", "1234",
+        help="16-bit ID shared by all fragments of the same original packet.\n"
+             "For non-fragmented packets: arbitrary value (OS increments per packet).\n"
+             "For fragmented packets: all fragments MUST share the same ID.\n"
+             "0 = valid for non-fragmented packets with DF=1 (RFC 6864)."))
+
+    # Flags
+    section("IP FLAGS + FRAGMENT OFFSET")
+    df = get("DF  Don't Fragment  (y/n)", "y",
+        help="DF=1: routers MUST NOT fragment this packet.\n"
+             "     If too large: router drops + sends ICMP type 3 code 4 (Frag Needed).\n"
+             "     Required for Path MTU Discovery (PMTUD) — always use y for TCP.\n"
+             "DF=0: routers may fragment if MTU is smaller than packet size.\n"
+             "     Used for UDP/GRE tunnels where fragmentation is acceptable.").lower().startswith('y')
+    mf = get("MF  More Fragments  (y/n)", "n",
+        help="MF=1: more fragments of this datagram follow this one.\n"
+             "MF=0: this is the last (or only) fragment of this datagram.\n"
+             "For a non-fragmented packet: MF=0 always.\n"
+             "For fragments: MF=1 on every fragment EXCEPT the last.").lower().startswith('y')
+    frag_off = int(get("Fragment Offset  (0 for non-fragmented)", "0",
+        help="13-bit field specifying the offset of this fragment's data in the\n"
+             "original datagram, measured in 8-byte units.\n"
+             "0 = first or only fragment (unfragmented packets always use 0).\n"
+             "Example: fragment carrying bytes 1480–2959 → offset = 1480÷8 = 185.\n"
+             "All fragments except the last have MF=1; last fragment has MF=0.")) & 0x1FFF
+
+    flags_frag = (0 << 15) | ((1 if df else 0) << 14) | ((1 if mf else 0) << 13) | frag_off
+
+    # DSCP / ECN
+    section("DSCP / ECN  (Quality of Service)")
+    dscp_val = int(get("DSCP value  (0–63, see table above)", "0",
+        help="6-bit Differentiated Services Code Point — sets QoS class.\n"
+             "0  = CS0/BE = Best Effort (default, no priority).\n"
+             "46 = EF = Expedited Forwarding — lowest latency (VoIP, RTP).\n"
+             "48 = CS6 = Network Control — routing protocol packets (BGP, OSPF).\n"
+             "34–38 = AF41-AF43 = video conferencing class.\n"
+             "Routers use DSCP to decide which queue to place the packet in.")) & 0x3F
+    ecn_val = int(get("ECN  (0=non-ECN  1=ECT1  2=ECT0  3=CE)", "0",
+        help="2-bit Explicit Congestion Notification.\n"
+             "0 = Not-ECN-capable (traditional packet, no congestion signalling).\n"
+             "1 = ECN-capable Transport, codepoint 1 (ECT1).\n"
+             "2 = ECN-capable Transport, codepoint 0 (ECT0).\n"
+             "3 = Congestion Experienced (CE) — set by router when buffer filling.\n"
+             "Receiver copies CE to TCP/CWR flag, allowing senders to slow down.\n"
+             "Only effective when both endpoints and all routers support ECN.")) & 0x3
+    tos = (dscp_val << 2) | ecn_val
+
+    # IP Options
+    opt_bytes, opt_records = ask_ip_options()
+    ihl = 5 + len(opt_bytes) // 4
+
+    # ── L4 Payload ────────────────────────────────────────────────────────────
+    payload_ch = ask_ip_payload()
+    l4_payload = b''
+    l4_records = []
+    l4_proto_override = None
+
+    if payload_ch == '1':
+        # ICMP — reuse existing builder
+        icmp_type, icmp_code, icmp_id, icmp_seq, icmp_data, data_hex = ask_l4_icmp()
+        l4_payload, l4_records, l4_ck = build_icmp(
+            icmp_type, icmp_code, icmp_id, icmp_seq, icmp_data, data_hex)
+        l4_proto_override = 1
+
+    elif payload_ch == '2':
+        # TCP — ask_l4_tcp handles step selection internally
+        print_tcp_handshake_diagram()
+        (step, step_name, src_port, dst_port, seq_num, ack_num,
+         data_off, flags_val, window, urg_ptr, tcp_data,
+         sip, dip) = ask_l4_tcp(src_ip, dst_ip)
+        l4_payload, l4_records, l4_ck = build_tcp(
+            step, step_name, src_port, dst_port, seq_num, ack_num,
+            data_off, flags_val, window, urg_ptr, tcp_data, src_ip, dst_ip)
+        l4_proto_override = 6
+
+    elif payload_ch == '3':
+        # UDP
+        (src_port, dst_port, udp_data, sip, dip) = ask_l4_udp(src_ip, dst_ip)
+        l4_payload, l4_records, l4_ck = build_udp(
+            src_port, dst_port, udp_data, src_ip, dst_ip)
+        l4_proto_override = 17
+
+    elif payload_ch == '4':
+        section("RAW HEX PAYLOAD")
+        raw_hex = get("Payload hex bytes", "",
+            help="Enter the payload in hexadecimal — any bytes you want inside the IP packet.\n"
+                 "Use for custom protocols, encapsulated frames, or test patterns.\n"
+                 "Example: GRE header = 00 00 08 00  then inner IP header follows.")
+        try:    l4_payload = bytes.fromhex(raw_hex.replace(" ",""))
+        except: l4_payload = b''
+        if l4_payload:
+            l4_records = [{"layer":4,"name":"Raw Payload",
+                           "raw":l4_payload,"user_val":f"{len(l4_payload)}B","note":"raw hex"}]
+    # payload_ch == '5': empty — l4_payload stays b''
+
+    # Use protocol override if L4 selected a specific protocol
+    if l4_proto_override:
+        proto_num = l4_proto_override
+
+    # ── Build IP header ────────────────────────────────────────────────────────
+    tot_len = ihl * 4 + len(l4_payload)
+    ver_ihl = (4 << 4) | ihl
+
+    # Build with checksum=0 first
+    hdr0 = struct.pack("!BBHHHBBH4s4s",
+        ver_ihl, tos, tot_len, ip_id, flags_frag,
+        ttl, proto_num, 0,
+        ip_b(src_ip), ip_b(dst_ip))
+    if opt_bytes:
+        hdr0 = hdr0 + opt_bytes
+
+    auto_ck = inet_cksum(hdr0)
+
+    # ── Checksum section — auto or manual ─────────────────────────────────────
+    section("IP HEADER CHECKSUM  (RFC 791 — one's complement)")
+    print(f"    Header size      : {ihl*4} bytes  (IHL={ihl})")
+    print(f"    Auto-computed    : 0x{auto_ck:04X}")
+    print(f"    Verify formula   : sum all header 16-bit words → must equal 0xFFFF")
+    print(f"\n    Options:")
+    print(f"      1 = Use auto-calculated checksum  0x{auto_ck:04X}  (correct)")
+    print(f"      2 = Enter custom checksum         (for testing bad-checksum handling)")
+    print(f"      3 = Force 0x0000                  (simulate checksum-offload / not computed)")
+    ck_ch = input("    Choice [1]: ").strip() or '1'
+
+    if ck_ch == '2':
+        ck_hex = get("Custom checksum (4 hex chars)", f"{auto_ck:04x}",
+            help="Enter any 4 hex characters as the checksum value.\n"
+                 "Use a wrong value to test how receivers handle bad checksums.\n"
+                 "FFFF is often used as a 'poison' value in testing.\n"
+                 "0000 = not computed (checksum offloading to NIC hardware).")
+        try:    user_ck = int(ck_hex, 16) & 0xFFFF
+        except: user_ck = auto_ck
+        ck_note = f"0x{user_ck:04X}  CUSTOM (auto would be 0x{auto_ck:04X})"
+        ck_val  = user_ck
+    elif ck_ch == '3':
+        ck_val  = 0x0000
+        ck_note = "0x0000 forced (checksum offload / not computed)"
+    else:
+        ck_val  = auto_ck
+        ck_note = f"0x{auto_ck:04X}  RFC791 one's complement (auto)"
+
+    # ── Assemble final header ─────────────────────────────────────────────────
+    hdr = struct.pack("!BBHHHBBH4s4s",
+        ver_ihl, tos, tot_len, ip_id, flags_frag,
+        ttl, proto_num, ck_val,
+        ip_b(src_ip), ip_b(dst_ip))
+    if opt_bytes:
+        hdr = hdr + opt_bytes
+
+    full_packet = hdr + l4_payload
+
+    # ── Checksum verification ─────────────────────────────────────────────────
+    ck_verify = inet_cksum(hdr)
+    ck_ok     = (ck_verify == 0)   # all-ones after adding stored checksum = valid
+
+    # ── Build records ─────────────────────────────────────────────────────────
+    flag_parts = []
+    if flags_frag & 0x4000: flag_parts.append("DF")
+    if flags_frag & 0x2000: flag_parts.append("MF")
+    flag_str = '+'.join(flag_parts) if flag_parts else "none"
+    dscp_name = DSCP_TABLE.get(dscp_val, (f"DSCP{dscp_val}", ""))[0]
+    ecn_names = {0:"Non-ECN",1:"ECT1",2:"ECT0",3:"CE"}
+
+    records = [
+        {"layer":3,"name":"IP Version + IHL",
+         "raw":hdr[0:1],"user_val":f"v4 / IHL={ihl}",
+         "note":f"Header={ihl*4}B  {'options present' if ihl>5 else 'no options'}"},
+
+        {"layer":3,"name":"IP DSCP + ECN",
+         "raw":hdr[1:2],"user_val":f"DSCP={dscp_val}({dscp_name}) ECN={ecn_val}({ecn_names[ecn_val]})",
+         "note":f"TOS byte = 0x{tos:02X}"},
+
+        {"layer":3,"name":"IP Total Length",
+         "raw":hdr[2:4],"user_val":"auto",
+         "note":f"{tot_len}B  (header {ihl*4}B + payload {len(l4_payload)}B)"},
+
+        {"layer":3,"name":"IP Identification",
+         "raw":hdr[4:6],"user_val":str(ip_id),
+         "note":f"0x{ip_id:04X}  fragment group ID"},
+
+        {"layer":3,"name":"IP Flags + Frag Offset",
+         "raw":hdr[6:8],"user_val":f"flags={flag_str}  offset={frag_off}",
+         "note":f"DF={int(df)} MF={int(mf)} FragOffset={frag_off} (×8={frag_off*8}B)"},
+
+        {"layer":3,"name":"IP TTL",
+         "raw":hdr[8:9],"user_val":str(ttl),
+         "note":"hops remaining"},
+
+        {"layer":3,"name":"IP Protocol",
+         "raw":hdr[9:10],"user_val":str(proto_num),
+         "note":IP_PROTO_NAMES.get(proto_num,(str(proto_num),""))[0]},
+
+        {"layer":3,"name":"IP Header Checksum",
+         "raw":hdr[10:12],"user_val":f"0x{ck_val:04X}",
+         "note":ck_note},
+
+        {"layer":3,"name":"IP Source Address",
+         "raw":hdr[12:16],"user_val":src_ip,"note":""},
+
+        {"layer":3,"name":"IP Destination Addr",
+         "raw":hdr[16:20],"user_val":dst_ip,"note":""},
+    ]
+
+    # Add option records if present
+    records += opt_records
+
+    # Add L4 records
+    records += l4_records
+
+    # ── Output ────────────────────────────────────────────────────────────────
+    verify_checks = [("IP Header Checksum (RFC791)", f"0x{ck_val:04X}",
+                      f"0x{ck_verify:04X} → {'0x0000=PASS' if ck_ok else 'NON-ZERO=FAIL'}", ck_ok)]
+
+    # Add L4 checksum checks
+    if payload_ch == '1' and l4_records:
+        icmp_ver = inet_cksum(l4_payload)
+        verify_checks.append(("ICMP Checksum (RFC792)",
+                               f"0x{l4_ck:04X}", f"verify={icmp_ver:04X}", icmp_ver==0))
+    elif payload_ch == '2' and l4_records:
+        tcp_ver = tcp_checksum(src_ip, dst_ip, l4_payload)
+        verify_checks.append(("TCP Checksum (RFC793 pseudo-hdr)",
+                               f"0x{l4_ck:04X}", f"verify={tcp_ver:04X}", tcp_ver==0))
+    elif payload_ch == '3' and l4_records:
+        udp_ver = udp_checksum(src_ip, dst_ip, l4_payload)
+        verify_checks.append(("UDP Checksum (RFC768 pseudo-hdr)",
+                               f"0x{l4_ck:04X}", f"verify={udp_ver:04X}", udp_ver==0))
+
+    banner(f"STANDALONE IPv4 PACKET  —  {src_ip} → {dst_ip}  proto={proto_name}  {tot_len}B")
+    print_frame_table(records)
+    verify_report(verify_checks)
+    print_encapsulation(records, full_packet)
+
+
+# ── Update menus ──────────────────────────────────────────────────────────────
+
 L3_DISPATCH = {
     '1' : flow_eth_arp,
     '2' : flow_eth_ip_icmp,
@@ -4645,9 +5182,30 @@ L3_DISPATCH = {
     '13': flow_eth_jumbo,
 }
 
+MAIN_MENU = """
+╔════════════════════════════════════════════════════════════════════════════════╗
+║           NETWORK FRAME BUILDER  —  LAYERED INPUT FLOW                        ║
+╠════════════════════════════════════════════════════════════════════════════════╣
+║  SELECT LAYER 2 / STANDALONE TECHNOLOGY                                        ║
+╠═══╦════════════════════════════════════════════════════════════════════════════╣
+║ 1 ║ Ethernet / 802.3  →  choose L3 protocol (13 options)                      ║
+║   ║  ARP | ICMP | TCP | UDP | STP | DTP | PAgP | LACP                         ║
+║   ║  Pause(802.3x) | PFC(802.1Qbb) | LLDP(802.1AB) | VLAN(802.1Q) | Jumbo    ║
+╠═══╬════════════════════════════════════════════════════════════════════════════╣
+║ 2 ║ Serial / WAN  →  choose L2 protocol (11 options incl. HDLC I/S/U)         ║
+║   ║  Raw | SLIP | PPP | HDLC-basic | HDLC-Full(I/S/U) | Modbus | ATM ...      ║
+╠═══╬════════════════════════════════════════════════════════════════════════════╣
+║ 3 ║ WiFi / 802.11  →  choose frame type (Management / Control / Data)         ║
+║   ║  Beacon | Probe | Auth | Assoc | RTS | CTS | ACK | QoS-Data | Null        ║
+╠═══╬════════════════════════════════════════════════════════════════════════════╣
+║ 4 ║ Standalone IPv4 Packet  →  all header fields + options + L4 payload       ║
+║   ║  Full header | DSCP/ECN | DF/MF/FragOffset | Options(NOP/RR/TS)           ║
+║   ║  Checksum: auto / custom / force-zero  |  L4: ICMP/TCP/UDP/Raw/Empty      ║
+╚═══╩════════════════════════════════════════════════════════════════════════════╝"""
+
 def main():
     print(MAIN_MENU)
-    top = input("  Choose technology  (1=Ethernet  2=Serial  3=WiFi): ").strip()
+    top = input("  Choose technology  (1=Ethernet  2=Serial  3=WiFi  4=IP): ").strip()
 
     if top == '1':
         print(L3_ETH_MENU)
@@ -4661,6 +5219,9 @@ def main():
 
     elif top == '3':
         flow_wifi()
+
+    elif top == '4':
+        flow_ip_standalone()
 
     else:
         print("  Invalid choice.")
