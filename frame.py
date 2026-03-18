@@ -25,15 +25,68 @@ Output per build
   Final hex (no gaps)  ·  Checksum verification (PASS/FAIL)
   Every prompt: ┆ what the field does  ┆ valid values  ┆ effect of wrong value
 """
-import struct, zlib, socket
+import struct, zlib, socket, os, sys
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  SECTION 1 — CONSTANTS  (widths, tags, lookup tables, menus)
 # ══════════════════════════════════════════════════════════════════════════════
-W   = 118           # total print width
+W   = 118
 SEP = "═" * W
 DIV = "─" * W
 HDR = "─" * W
+
+# ── ANSI colour palette ───────────────────────────────────────────────────────
+# Auto-detect terminal support; fall back gracefully if no colour
+_USE_COLOR = sys.stdout.isatty() or os.environ.get('FORCE_COLOR')
+
+class C:
+    """ANSI colour codes.  All empty strings when colour is disabled."""
+    if _USE_COLOR:
+        RESET  = "\033[0m"
+        BOLD   = "\033[1m"
+        DIM    = "\033[2m"
+        ITALIC = "\033[3m"
+        UL     = "\033[4m"
+
+        # Layer colours
+        L1     = "\033[38;5;220m"   # gold        — Physical
+        L2     = "\033[38;5;75m"    # sky blue    — Data Link
+        L3     = "\033[38;5;118m"   # lime green  — Network
+        L4     = "\033[38;5;213m"   # pink/violet — Transport
+        TRAIL  = "\033[38;5;203m"   # coral/red   — Trailer / FCS
+
+        # UI colours
+        BANNER = "\033[38;5;39m"    # bright cyan     — banners
+        SECT   = "\033[38;5;178m"   # amber           — section headers
+        HELP   = "\033[38;5;245m"   # grey            — help text (┆ lines)
+        PROMPT = "\033[38;5;252m"   # near-white      — prompts
+        HEX    = "\033[38;5;159m"   # pale cyan       — hex values
+        NOTE   = "\033[38;5;186m"   # pale yellow     — notes/annotations
+        PASS_  = "\033[1;38;5;46m"  # bright green    — PASS ✓
+        FAIL_  = "\033[1;38;5;196m" # bright red      — FAIL ✗
+        WARN   = "\033[38;5;214m"   # orange          — warnings
+        TAG1   = "\033[38;5;220m"   # L1 gold
+        TAG2   = "\033[38;5;75m"    # L2 blue
+        TAG3   = "\033[38;5;118m"   # L3 green
+        TAG4   = "\033[38;5;213m"   # L4 pink
+        TAG0   = "\033[38;5;203m"   # Trailer coral
+        BOX    = "\033[38;5;240m"   # dark grey       — box drawing
+        SEP_C  = "\033[38;5;25m"    # dark blue       — separator lines
+        OFFSET = "\033[38;5;243m"   # mid grey        — byte offsets
+        SIZE   = "\033[38;5;180m"   # tan             — size fields
+        ASCII_ = "\033[38;5;188m"   # light grey      — ASCII column
+    else:
+        RESET=BOLD=DIM=ITALIC=UL=""
+        L1=L2=L3=L4=TRAIL=""
+        BANNER=SECT=HELP=PROMPT=""
+        HEX=NOTE=PASS_=FAIL_=WARN=""
+        TAG1=TAG2=TAG3=TAG4=TAG0=""
+        BOX=SEP_C=OFFSET=SIZE=ASCII_=""
+
+# Colour for each layer tag
+_TAG_COLOR = {1: C.TAG1, 2: C.TAG2, 3: C.TAG3, 4: C.TAG4, 0: C.TAG0}
+_LAYER_COLOR = {1: C.L1, 2: C.L2, 3: C.L3, 4: C.L4, 0: C.TRAIL}
+
 LAYER_TAG = {
     1: "[L1-PHY ]",
     2: "[L2-DL  ]",
@@ -41,6 +94,13 @@ LAYER_TAG = {
     4: "[L4-CTRL]",
     0: "[TRAILER]",
 }
+
+def ctag(layer):
+    """Return coloured LAYER_TAG string."""
+    raw = LAYER_TAG.get(layer, "        ")
+    col = _TAG_COLOR.get(layer, "")
+    return f"{col}{raw}{C.RESET}"
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  Protocol lookup tables
@@ -267,28 +327,29 @@ def get(prompt, default="", help=""):
     """Simple prompted input with default. Optional help shown before prompt."""
     if help:
         for line in help.strip().split("\n"):
-            print(f"      ┆ {line}")
-    val = input(f"    {prompt} [{default}]: ").strip()
+            print(f"      {C.HELP}┆ {line}{C.RESET}")
+    val = input(f"    {C.PROMPT}{prompt}{C.RESET} [{C.NOTE}{default}{C.RESET}]: ").strip()
     return val if val else default
+
 def get_hex(prompt, default_hex, byte_len=None, help=""):
     """Prompt for hex bytes, validate length. Optional help shown before prompt."""
     if help:
         for line in help.strip().split("\n"):
-            print(f"      ┆ {line}")
+            print(f"      {C.HELP}┆ {line}{C.RESET}")
     while True:
-        raw = input(f"    {prompt} [{default_hex}]: ").strip().lower()
+        raw = input(f"    {C.PROMPT}{prompt}{C.RESET} [{C.HEX}{default_hex}{C.RESET}]: ").strip().lower()
         if not raw:
-            print(f"      -> using default: {default_hex}")
+            print(f"      {C.DIM}-> using default: {default_hex}{C.RESET}")
             return bytes.fromhex(default_hex.replace(" ","").replace(":",""))
         try:
             cleaned = raw.replace(":","").replace("-","").replace(" ","")
             b = bytes.fromhex(cleaned)
             if byte_len and len(b) != byte_len:
-                print(f"      -> need exactly {byte_len} bytes ({byte_len*2} hex chars)")
+                print(f"      {C.WARN}-> need exactly {byte_len} bytes ({byte_len*2} hex chars){C.RESET}")
                 continue
             return b
         except ValueError:
-            print("      -> invalid hex, try again")
+            print(f"      {C.WARN}-> invalid hex, try again{C.RESET}")
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  Address and byte converters
@@ -376,33 +437,34 @@ def slip_enc(data):
 #  Display / output engine
 # ──────────────────────────────────────────────────────────────────────────────
 def banner(title, subtitle=""):
-    print(f"\n{SEP}")
-    print(f"  {title}")
-    if subtitle: print(f"  {subtitle}")
-    print(SEP)
+    bar = f"{C.BANNER}{C.BOLD}{SEP}{C.RESET}"
+    print(f"\n{bar}")
+    print(f"  {C.BOLD}{C.BANNER}{title}{C.RESET}")
+    if subtitle:
+        print(f"  {C.DIM}{subtitle}{C.RESET}")
+    print(bar)
+
 def section(title):
-    print(f"\n  {'▌ '+title}")
-    print(f"  {DIV}")
+    print(f"\n  {C.SECT}{C.BOLD}▌ {title}{C.RESET}")
+    print(f"  {C.SEP_C}{DIV}{C.RESET}")
+
 def print_frame_table(records):
-    """
-    records: list of dicts with keys:
-        layer   : int  (1/2/3/4/0)
-        name    : str  field name
-        raw     : bytes
-        note    : str  human-readable value / description
-        user_val: str  the exact value the user entered (or auto)
-    """
-    print(f"\n{SEP}")
-    print(f"  {'COMPLETE FRAME  –  FIELD-BY-FIELD TABLE':^{W-2}}")
-    print(SEP)
-    hdr = (f"  {'Byte':>6}  "
+    bar  = f"{C.BANNER}{SEP}{C.RESET}"
+    dash = f"{C.SEP_C}{DIV}{C.RESET}"
+    dot  = f"{C.BOX}{'·'*114}{C.RESET}"
+
+    print(f"\n{bar}")
+    print(f"  {C.BOLD}{C.BANNER}{'COMPLETE FRAME  –  FIELD-BY-FIELD TABLE':^{W-2}}{C.RESET}")
+    print(bar)
+
+    hdr = (f"  {C.DIM}{'Byte':>6}  "
            f"{'Layer':<11}  "
            f"{'Field Name':<28}  "
            f"{'Size':>8}  "
            f"{'Hex Value':<30}  "
-           f"{'User Input / Note'}")
+           f"{'User Input / Note'}{C.RESET}")
     print(hdr)
-    print(f"  {DIV}")
+    print(dash)
 
     offset = 0
     prev_layer = None
@@ -412,76 +474,63 @@ def print_frame_table(records):
         raw  = r['raw']
         note = r.get('note', '')
         uval = r.get('user_val', '')
+        lc   = _LAYER_COLOR.get(lay, "")
 
-        # separator when layer changes
         if lay != prev_layer and prev_layer is not None:
-            print(f"  {'·'*114}")
+            print(f"  {dot}")
         prev_layer = lay
 
-        sz   = len(raw)
+        sz = len(raw)
 
-        # zero-length raw = annotation/breakdown row only
+        # zero-length = annotation-only row
         if sz == 0:
             annotation = uval if uval else note
             if uval and note and uval != note:
                 annotation = f"{uval}  ({note})"
-            tag = LAYER_TAG.get(lay, "        ")
-            print(f"  {'':10}  {tag}    {name:<28}  {'':>8}   {'':30}    {annotation}")
+            print(f"  {'':10}  {ctag(lay)}  "
+                  f"  {C.DIM}{name:<28}{C.RESET}  "
+                  f"{'':>8}   {'':30}  "
+                  f"  {C.NOTE}{annotation}{C.RESET}")
             continue
 
         hexs = ' '.join(f'{b:02x}' for b in raw)
-        # truncate hex display if very long
         if len(hexs) > 29: hexs = hexs[:27] + '..'
 
-        # Build user-input annotation
         annotation = uval if uval else note
-        # show note separately if both exist
         if uval and note and uval != note:
             annotation = f"{uval}  ({note})"
 
-        tag = LAYER_TAG.get(lay, "        ")
-        print(f"  {offset:5d}-{offset+sz-1:<4d}  "
-              f"{tag}  "
-              f"  {name:<28}  "
-              f"{sz:3d}B/{sz*8:4d}b  "
-              f"  {hexs:<30}  "
-              f"  {annotation}")
+        print(f"  {C.OFFSET}{offset:5d}-{offset+sz-1:<4d}{C.RESET}  "
+              f"{ctag(lay)}  "
+              f"  {lc}{name:<28}{C.RESET}  "
+              f"{C.SIZE}{sz:3d}B/{sz*8:4d}b{C.RESET}  "
+              f"  {C.HEX}{hexs:<30}{C.RESET}  "
+              f"  {C.NOTE}{annotation}{C.RESET}")
         offset += sz
 
-    print(f"  {DIV}")
-    print(f"  {'Total':>5}: {offset} bytes  /  {offset*8} bits")
-    print(SEP)
+    print(dash)
+    print(f"  {C.BOLD}{'Total':>5}: {offset} bytes  /  {offset*8} bits{C.RESET}")
+    print(bar)
+
 def print_encapsulation(records, frame):
-    """
-    Print three things:
-    1. Nested encapsulation box diagram showing which bytes belong to which layer
-    2. Annotated hex dump with layer markers
-    3. Plain final hex (no gaps) + total bytes
-    """
     W2 = 110
 
-    # ── collect layer spans ────────────────────────────────────────────────────
-    # Each span: (start_byte, end_byte_inclusive, layer, group_name)
-    layer_spans = []   # list of (start, end, layer, label)
+    layer_spans = []
     offset = 0
     for r in records:
         sz = len(r['raw'])
-        if sz == 0:
-            continue   # skip annotation-only rows
+        if sz == 0: continue
         layer_spans.append((offset, offset+sz-1, r['layer'], r['name']))
         offset += sz
     total_bytes = offset
 
-    # ── group spans by layer into contiguous blocks ────────────────────────────
-    # We want: L1 block, L2 block, L3 block, L4 block, Trailer block
-    # Build: layer -> (first_byte, last_byte, display_label)
     layer_groups = {}
     for (s, e, lay, name) in layer_spans:
         if lay not in layer_groups:
             layer_groups[lay] = [s, e, name]
         else:
-            layer_groups[lay][1] = e   # extend end
-    # Assign group labels
+            layer_groups[lay][1] = e
+
     LAYER_LABELS = {
         1: "LAYER 1  Physical  (Preamble + SFD / Flags)",
         2: "LAYER 2  Data Link  (MAC / Serial header)",
@@ -490,53 +539,45 @@ def print_encapsulation(records, frame):
         0: "TRAILER  (FCS / CRC)",
     }
 
-    # ── determine protocol names per layer from records ────────────────────────
     def proto_names(layer):
         seen = []
         for r in records:
             if r['layer'] == layer:
                 n = r['name'].split()[0]
-                if n not in seen:
-                    seen.append(n)
+                if n not in seen: seen.append(n)
         return ' | '.join(seen[:4])
 
-    # ── Print encapsulation diagram ────────────────────────────────────────────
-    print(f"\n{SEP}")
-    print(f"  {'FRAME ENCAPSULATION  —  STRUCTURE DIAGRAM':^{W-2}}")
-    print(SEP)
+    bar = f"{C.BANNER}{SEP}{C.RESET}"
+    print(f"\n{bar}")
+    print(f"  {C.BOLD}{C.BANNER}{'FRAME ENCAPSULATION  —  STRUCTURE DIAGRAM':^{W-2}}{C.RESET}")
+    print(bar)
     print()
 
     sorted_layers = sorted(layer_groups.keys(), key=lambda x: (x if x != 0 else 99))
-
-    # Box drawing chars
-    TL='╔'; TR='╗'; BL='╚'; BR='╝'; H='═'; V='║'
-    ITL='╠'; ITR='╣'; IH='─'; IML='├'; IMR='┤'
-
     indent_map = {1:0, 2:2, 3:4, 4:6, 0:0}
 
     for lay in sorted_layers:
         s, e, _ = layer_groups[lay]
+        lc    = _LAYER_COLOR.get(lay, "")
         ind   = ' ' * indent_map.get(lay, 0)
         width = W2 - indent_map.get(lay, 0) - 2
         label = LAYER_LABELS.get(lay, f"Layer {lay}")
         proto = proto_names(lay)
         bytes_count = e - s + 1
 
-        # Top border
-        print(f"  {ind}{TL}{H*width}{TR}")
-        # Label line
+        bc = f"{C.BOX}"  # box colour
+        rc = C.RESET
+
+        print(f"  {ind}{bc}╔{'═'*width}╗{rc}")
         content = f"  {label}"
-        print(f"  {ind}{V}{content:<{width}}{V}")
-        # Protocol line
+        print(f"  {ind}{bc}║{rc}{lc}{C.BOLD}{content:<{width}}{rc}{bc}║{rc}")
         if proto:
             pcontent = f"  Protocols: {proto}"
-            print(f"  {ind}{V}{pcontent:<{width}}{V}")
-        # Byte range line
+            print(f"  {ind}{bc}║{rc}{C.DIM}{pcontent:<{width}}{rc}{bc}║{rc}")
         bcontent = f"  Bytes {s}–{e}  ({bytes_count} bytes / {bytes_count*8} bits)"
-        print(f"  {ind}{V}{bcontent:<{width}}{V}")
-        # Fields line — list all field names
+        print(f"  {ind}{bc}║{rc}{C.OFFSET}{bcontent:<{width}}{rc}{bc}║{rc}")
+
         fnames = [r['name'] for r in records if r['layer'] == lay]
-        # wrap field names into lines of ~width-4 chars
         line_buf = "  Fields: "
         field_lines = []
         for fn in fnames:
@@ -549,143 +590,196 @@ def print_encapsulation(records, frame):
         if line_buf.strip():
             field_lines.append(line_buf.rstrip())
         for fl in field_lines:
-            print(f"  {ind}{V}{fl:<{width}}{V}")
-        # Hex preview (first 24 bytes of this layer)
+            print(f"  {ind}{bc}║{rc}{C.DIM}{fl:<{width}}{rc}{bc}║{rc}")
+
         layer_bytes = frame[s:e+1]
         hex_preview = ' '.join(f'{b:02x}' for b in layer_bytes[:24])
-        if len(layer_bytes) > 24:
-            hex_preview += ' ..'
+        if len(layer_bytes) > 24: hex_preview += ' ..'
         hcontent = f"  Hex: {hex_preview}"
-        print(f"  {ind}{V}{hcontent:<{width}}{V}")
-        # Bottom border (no close for layers that nest inside)
-        if lay == 0:
-            print(f"  {ind}{BL}{H*width}{BR}")
-        elif lay == max(sorted_layers[:-1] if 0 in sorted_layers else sorted_layers):
-            print(f"  {ind}{BL}{H*width}{BR}")
-        else:
-            # partial close — inner layer will continue
-            print(f"  {ind}{BL}{H*width}{BR}")
+        print(f"  {ind}{bc}║{rc}{C.HEX}{hcontent:<{width}}{rc}{bc}║{rc}")
+        print(f"  {ind}{bc}╚{'═'*width}╝{rc}")
         print()
 
-    # ── Nesting summary ────────────────────────────────────────────────────────
-    print(f"  {DIV}")
-    print(f"  ENCAPSULATION SUMMARY  (outermost → innermost)")
-    print(f"  {DIV}")
+    # Nesting summary
+    dash = f"{C.SEP_C}{'─'*W2}{C.RESET}"
+    print(f"  {dash}")
+    print(f"  {C.BOLD}ENCAPSULATION SUMMARY  (outermost → innermost){C.RESET}")
+    print(f"  {dash}")
+
     nesting = []
     for lay in sorted(layer_groups.keys()):
         if lay == 0: continue
-        s, e, _ = layer_groups[lay]
+        lc = _LAYER_COLOR.get(lay, "")
         proto = proto_names(lay)
-        nesting.append(f"L{lay}({proto})")
-    nesting_str = '  ──encapsulates──>  '.join(nesting)
+        nesting.append(f"{lc}L{lay}({proto}){C.RESET}")
+    arrow = f"  {C.BOX}──encapsulates──>{C.RESET}  "
+    nesting_str = arrow.join(nesting)
     if 0 in layer_groups:
         s, e, _ = layer_groups[0]
-        nesting_str += f"  ──trailer──>  FCS/CRC({e-s+1}B)"
+        nesting_str += f"  {C.BOX}──trailer──>{C.RESET}  {C.TRAIL}FCS/CRC({e-s+1}B){C.RESET}"
     print(f"  {nesting_str}")
     print()
-    # total sizes
+
     for lay in sorted(layer_groups.keys(), key=lambda x: x if x != 0 else 99):
         s, e, _ = layer_groups[lay]
+        lc    = _LAYER_COLOR.get(lay, "")
         lname = LAYER_LABELS.get(lay, f"Layer {lay}")
-        print(f"    {lname:<55}  {e-s+1:4d} bytes  /  {(e-s+1)*8:5d} bits  [byte {s}–{e}]")
-    print(f"  {DIV}")
-    print(f"  {'TOTAL FRAME':<55}  {total_bytes:4d} bytes  /  {total_bytes*8:5d} bits")
-    print(f"  {DIV}")
+        print(f"    {lc}{lname:<55}{C.RESET}  "
+              f"{C.SIZE}{e-s+1:4d} bytes  /  {(e-s+1)*8:5d} bits{C.RESET}  "
+              f"{C.OFFSET}[byte {s}–{e}]{C.RESET}")
 
-    # ── Annotated hex dump ─────────────────────────────────────────────────────
-    print()
-    print(f"  {'─'*W2}")
-    print(f"  {'ANNOTATED HEX DUMP  (16 bytes per row)':^{W2}}")
-    print(f"  {'─'*W2}")
-    print(f"  {'Offset':>6}  {'Hex (16 bytes per row)':<48}  {'ASCII':<16}  Layer annotation")
-    print(f"  {'─'*W2}")
+    print(f"  {dash}")
+    print(f"  {C.BOLD}{'TOTAL FRAME':<55}  {total_bytes:4d} bytes  /  {total_bytes*8:5d} bits{C.RESET}")
+    print(f"  {dash}")
 
-    # Build per-byte layer map
+    # Annotated hex dump
+    LAYER_ABBR = {1:'PHY', 2:'DL ', 3:'NET', 4:'TRP', 0:'TRL'}
     byte_layer = {}
-    byte_field  = {}
-    for (s, e, lay, fname) in layer_spans:
+    for (s, e, lay, _) in layer_spans:
         for b in range(s, e+1):
             byte_layer[b] = lay
-            byte_field[b]  = fname
 
-    LAYER_ABBR = {1:'PHY', 2:'DL ', 3:'NET', 4:'TRP', 0:'TRL'}
+    print()
+    print(f"  {dash}")
+    print(f"  {C.BOLD}{'ANNOTATED HEX DUMP  (16 bytes per row)':^{W2}}{C.RESET}")
+    print(f"  {dash}")
+    print(f"  {C.DIM}{'Offset':>6}  {'Hex (16 bytes per row)':<48}  {'ASCII':<16}  Layer annotation{C.RESET}")
+    print(f"  {dash}")
 
-    row_size = 16
-    for row_start in range(0, total_bytes, row_size):
-        row_bytes = frame[row_start:row_start+row_size]
-        hex_part  = ' '.join(f'{b:02x}' for b in row_bytes)
-        asc_part  = ''.join(chr(b) if 32 <= b < 127 else '.' for b in row_bytes)
+    for row_start in range(0, total_bytes, 16):
+        row_bytes = frame[row_start:row_start+16]
 
-        # determine dominant layer annotation for this row
+        # Build coloured hex — each byte gets its layer colour
+        hex_parts = []
+        for i, byte_val in enumerate(row_bytes):
+            bidx = row_start + i
+            lc   = _LAYER_COLOR.get(byte_layer.get(bidx, -1), "")
+            hex_parts.append(f"{lc}{byte_val:02x}{C.RESET}")
+        hex_part = ' '.join(hex_parts)
+        # pad to fixed width (48 visible chars = 16 bytes × 3 - 1 space)
+        # we need to account for ANSI escape codes not counting as width
+        visible_hex = ' '.join(f'{b:02x}' for b in row_bytes)
+        pad = ' ' * (48 - len(visible_hex))
+
+        asc_chars = []
+        for i, byte_val in enumerate(row_bytes):
+            bidx = row_start + i
+            lc   = _LAYER_COLOR.get(byte_layer.get(bidx, -1), "")
+            ch   = chr(byte_val) if 32 <= byte_val < 127 else '.'
+            asc_chars.append(f"{lc}{ch}{C.RESET}")
+        asc_part = ''.join(asc_chars)
+        visible_asc = ''.join(chr(b) if 32 <= b < 127 else '.' for b in row_bytes)
+        asc_pad = ' ' * (16 - len(visible_asc))
+
+        # Layer annotation
         layers_in_row = []
-        for i, b_idx in enumerate(range(row_start, row_start+len(row_bytes))):
-            lay = byte_layer.get(b_idx, -1)
+        for bidx in range(row_start, row_start + len(row_bytes)):
+            lay = byte_layer.get(bidx, -1)
             if not layers_in_row or layers_in_row[-1][0] != lay:
-                layers_in_row.append([lay, b_idx, b_idx])
+                layers_in_row.append([lay, bidx, bidx])
             else:
-                layers_in_row[-1][2] = b_idx
+                layers_in_row[-1][2] = bidx
 
-        # build annotation: "PHY[0-7] DL[8-21] NET[22-41]"
         ann_parts = []
         for (lay, bs, be) in layers_in_row:
+            lc   = _LAYER_COLOR.get(lay, "")
             abbr = LAYER_ABBR.get(lay, '???')
-            ann_parts.append(f"{abbr}[{bs}-{be}]")
+            ann_parts.append(f"{lc}{abbr}[{bs}-{be}]{C.RESET}")
         annotation = '  '.join(ann_parts)
 
-        print(f"  {row_start:6d}  {hex_part:<48}  {asc_part:<16}  {annotation}")
+        print(f"  {C.OFFSET}{row_start:6d}{C.RESET}  {hex_part}{pad}  {asc_part}{asc_pad}  {annotation}")
 
-    print(f"  {'─'*W2}")
+    print(f"  {dash}")
 
-    # ── Final hex no gaps ──────────────────────────────────────────────────────
+    # Final hex
     print()
-    print(f"  {'─'*W2}")
-    print(f"  {'FINAL HEX  (continuous, no gaps)':^{W2}}")
-    print(f"  {'─'*W2}")
+    print(f"  {dash}")
+    print(f"  {C.BOLD}{'FINAL HEX  (continuous, no gaps)':^{W2}}{C.RESET}")
+    print(f"  {dash}")
     hex_str = ''.join(f'{b:02x}' for b in frame)
-    for i in range(0, len(hex_str), 64):
-        print(f"  {hex_str[i:i+64]}")
-    print(f"  {'─'*W2}")
-    print(f"  Total bytes : {total_bytes}")
-    print(f"  Total bits  : {total_bytes * 8}")
-    print(SEP + "\n")
+    # Print with layer-coloured groups
+    offset_map = {}
+    for (s, e, lay, _) in layer_spans:
+        for b in range(s, e+1):
+            offset_map[b] = lay
+    # Build coloured hex string in 64-char rows
+    coloured_hex = []
+    prev_lay = None
+    for bidx, b in enumerate(frame):
+        lay = offset_map.get(bidx, -1)
+        lc  = _LAYER_COLOR.get(lay, "")
+        if lay != prev_lay:
+            if prev_lay is not None:
+                coloured_hex.append(C.RESET)
+            coloured_hex.append(lc)
+            prev_lay = lay
+        coloured_hex.append(f'{b:02x}')
+    if prev_lay is not None:
+        coloured_hex.append(C.RESET)
+    coloured_hex_str = ''.join(coloured_hex)
+
+    # Print in rows of 64 visible hex chars (32 bytes)
+    row_len = 64
+    for i in range(0, len(hex_str), row_len):
+        # Extract the coloured portion for this row
+        # Simpler: recolour per row
+        row_hex = []
+        for bidx in range(i//2, min(i//2 + 32, len(frame))):
+            lay = offset_map.get(bidx, -1)
+            lc  = _LAYER_COLOR.get(lay, "")
+            row_hex.append(f"{lc}{frame[bidx]:02x}{C.RESET}")
+        print(f"  {''.join(row_hex)}")
+
+    print(f"  {dash}")
+    print(f"  {C.BOLD}Total bytes : {total_bytes}{C.RESET}")
+    print(f"  {C.BOLD}Total bits  : {total_bytes * 8}{C.RESET}")
+    print(f"{C.BANNER}{SEP}{C.RESET}\n")
+
 def ask_fcs_eth(fcs_input_bytes):
-    """Ask user for Ethernet FCS preference, return (fcs_bytes, fcs_note)."""
-    print(f"\n  ▌ ETHERNET FCS  (CRC-32 over {len(fcs_input_bytes)} bytes: Dst MAC → end of payload)")
-    print(f"  {DIV}")
-    ch = input("    1=Auto-calculate  2=Custom  [1]: ").strip() or '1'
+    print(f"\n  {C.SECT}{C.BOLD}▌ ETHERNET FCS{C.RESET}  "
+          f"{C.DIM}(CRC-32 over {len(fcs_input_bytes)} bytes: Dst MAC → end of payload){C.RESET}")
+    print(f"  {C.SEP_C}{DIV}{C.RESET}")
+    ch = input(f"    {C.PROMPT}1=Auto-calculate  2=Custom  [1]: {C.RESET}").strip() or '1'
     if ch == '2':
-        fcs_hex = input("    Enter 8 hex digits: ").strip()
+        fcs_hex = input(f"    {C.PROMPT}Enter 8 hex digits: {C.RESET}").strip()
         try:
             fcs = bytes.fromhex(fcs_hex)
             if len(fcs) == 4: return fcs, "custom"
         except: pass
-        print("    -> invalid, using auto")
+        print(f"    {C.WARN}-> invalid, using auto{C.RESET}")
     fcs = crc32_eth(fcs_input_bytes)
     return fcs, f"CRC-32 auto over {len(fcs_input_bytes)}B"
+
 def ask_serial_crc(crc_input_bytes, crc_type, byte_order='big'):
-    """Ask user for serial CRC preference."""
-    print(f"\n  ▌ {crc_type}  (covers {len(crc_input_bytes)} bytes)")
-    print(f"  {DIV}")
-    ch = input(f"    1=Auto-calculate  2=Custom  [1]: ").strip() or '1'
-    crc_val = crc16_ccitt(crc_input_bytes)
+    print(f"\n  {C.SECT}{C.BOLD}▌ {crc_type}{C.RESET}  {C.DIM}(covers {len(crc_input_bytes)} bytes){C.RESET}")
+    print(f"  {C.SEP_C}{DIV}{C.RESET}")
+    ch = input(f"    {C.PROMPT}1=Auto-calculate  2=Custom  [1]: {C.RESET}").strip() or '1'
+    crc_val  = crc16_ccitt(crc_input_bytes)
     fcs_auto = crc_val.to_bytes(2, byte_order)
     if ch == '2':
-        fcs_hex = input("    Enter hex: ").strip()
+        fcs_hex = input(f"    {C.PROMPT}Enter hex: {C.RESET}").strip()
         try:
             fcs = bytes.fromhex(fcs_hex)
             if len(fcs) == len(fcs_auto): return fcs, f"{crc_type} custom"
         except: pass
-        print("    -> invalid, using auto")
+        print(f"    {C.WARN}-> invalid, using auto{C.RESET}")
     return fcs_auto, f"{crc_type} auto over {len(crc_input_bytes)}B"
+
 def verify_report(checks):
-    """checks: list of (name, stored_val, verify_fn, pass_cond, pass_str)"""
-    print(f"\n  {'─'*80}")
-    print(f"  CHECKSUM / CRC VERIFICATION")
-    print(f"  {'─'*80}")
+    dash = f"{C.SEP_C}{'─'*80}{C.RESET}"
+    print(f"\n  {dash}")
+    print(f"  {C.BOLD}CHECKSUM / CRC VERIFICATION{C.RESET}")
+    print(f"  {dash}")
     for name, stored, result, passed in checks:
-        status = "PASS ✓" if passed else "FAIL ✗"
-        print(f"  {name:<30}  stored={stored}   verify={result}   {status}")
-    print(f"  {'─'*80}")
+        if passed:
+            status = f"{C.PASS_}PASS ✓{C.RESET}"
+        else:
+            status = f"{C.FAIL_}FAIL ✗{C.RESET}"
+        print(f"  {C.DIM}{name:<30}{C.RESET}  "
+              f"stored={C.HEX}{stored}{C.RESET}   "
+              f"verify={C.HEX}{result}{C.RESET}   {status}")
+    print(f"  {dash}")
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  SECTION 3 — LAYER 1  (Physical)
