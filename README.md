@@ -54,9 +54,8 @@ Python 2.x (legacy support, optional)
         python2 main.py
 ⚠️ Notes
      ✔️ Use Python 3 for full feature compatibility
+     
 ⚠️ Python 2 is deprecated and may break newer modules
-💡 On Linux, you may need:
-                      python3 main.py
 
 
 🖥️ Main Menu Interface
