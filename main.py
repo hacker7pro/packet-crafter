@@ -40,6 +40,26 @@ try:
 except ImportError:
     _HW_AVAILABLE = False
 
+try:
+    from phy_builder import (PHY_REGISTRY, ETH_SPEED_MENU, FC_SPEED_MENU,
+                              SERIAL_SPEED_MENU, registry_stats_phy,
+                              uses_preamble_sfd, uses_start_block, uses_8b10b_sof,
+                              get_phy_info, get_start_mechanism, get_end_mechanism,
+                              get_ifg, get_control_symbols, get_encoding_detail,
+                              get_ifg_pattern_display,
+                              encode_bytes_8b10b, encode_byte_8b10b,
+                              encode_bytes_4b5b, apply_mlt3,
+                              encode_bytes_manchester,
+                              encode_fc_frame_8b10b, encode_eth_frame_8b10b,
+                              format_encoding_display, codewords_to_bitstring,
+                              build_phy_stream, format_phy_stream_display,
+                              FC_SOF_BYTES, FC_EOF_BYTES, FC_SOF_DESC, FC_EOF_DESC,
+                              FC_IDLE_BYTES, FC_R_RDY_BYTES,
+                              _4B5B_DATA_TABLE, _4B5B_CTRL_TABLE)
+    _PHY_AVAILABLE = True
+except ImportError as _phy_err:
+    _PHY_AVAILABLE = False
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  LAYER PROGRESSION HELPERS
@@ -676,12 +696,244 @@ def verify_report(checks):
 # ══════════════════════════════════════════════════════════════════════════════
 #  SECTION 3 — LAYER 1  (Physical)
 # ══════════════════════════════════════════════════════════════════════════════
+
+def ask_phy_mode() -> str:
+    """
+    Ask user whether to include PHY layer simulation.
+    Returns: 'phy' or 'mac'
+    """
+    print(f"\n  {C.SECT}{C.BOLD}▌ PROCESSING MODE — Choose starting layer{C.RESET}")
+    print(f"  {C.SEP_C}{'─'*70}{C.RESET}")
+    print(f"  {C.L1}  [1]  Include PHY Layer  (Layer 1 simulation){C.RESET}")
+    print(f"       {C.DIM}  Shows: encoding scheme · frame start symbol · control blocks{C.RESET}")
+    print(f"       {C.DIM}  IFG / idle pattern · speed-specific framing · encoded bitstream{C.RESET}")
+    print(f"  {C.L2}  [2]  Start from MAC Layer  (Layer 2 only){C.RESET}")
+    print(f"       {C.DIM}  Direct: Preamble+SFD (default) → Dst MAC → frame build{C.RESET}")
+    choice = input(f"\n  {C.PROMPT}Choose (1=PHY  2=MAC) [default=2]: {C.RESET}").strip() or '2'
+    return 'phy' if choice == '1' else 'mac'
+
+
+def ask_eth_phy_speed() -> str:
+    """
+    Show Ethernet speed variant menu. Returns PHY registry key.
+    """
+    if not _PHY_AVAILABLE:
+        return 'MAC_ONLY'
+    print(f"\n  {C.SECT}{C.BOLD}▌ ETHERNET SPEED VARIANT{C.RESET}")
+    print(f"  {C.SEP_C}{'─'*80}{C.RESET}")
+    print(f"  {C.DIM}  {'No':>3}  {'Speed':<10}  {'Technology':<28}  {'Encoding':<28}  IFG{C.RESET}")
+    print(f"  {C.SEP_C}  {'─'*76}{C.RESET}")
+    for i, sp in enumerate(ETH_SPEED_MENU, 1):
+        p = PHY_REGISTRY.get(sp['key'], {})
+        ifg = p.get('ifg', {})
+        ifg_s = f"{ifg.get('min_bits',96)}b"
+        print(f"  {C.L1}  {i:>3}{C.RESET}  {C.BOLD}{sp['label']:<10}{C.RESET}  "
+              f"{sp['tech']:<28}  {C.DIM}{sp['encoding']:<28}  {ifg_s}{C.RESET}")
+    ch = input(f"\n  {C.PROMPT}Choose speed (1-{len(ETH_SPEED_MENU)}) [default=3 = 1G]: {C.RESET}").strip() or '3'
+    try:
+        idx = int(ch) - 1
+        assert 0 <= idx < len(ETH_SPEED_MENU)
+    except (ValueError, AssertionError):
+        idx = 2  # default 1G
+    return ETH_SPEED_MENU[idx]['key']
+
+
+def show_phy_framing(speed_key: str) -> tuple[bytes, bytes, list[dict]]:
+    """
+    Show PHY framing details for selected speed and ask user to confirm/edit
+    frame start fields. Returns (start_bytes, end_bytes, records).
+    Smart: uses Preamble+SFD for low-speed, Start Block for high-speed.
+    """
+    if not _PHY_AVAILABLE:
+        return ask_layer1_eth() + ([],)
+
+    p      = get_phy_info(speed_key)
+    fs     = get_start_mechanism(speed_key)
+    fe     = get_end_mechanism(speed_key)
+    ifg_d  = get_ifg(speed_key)
+    enc    = get_encoding_detail(speed_key)
+    ctrl   = get_control_symbols(speed_key)
+
+    SEP = '─' * 80
+    print(f"\n  {C.SECT}{C.BOLD}▌ PHY FRAMING — {p.get('name','')}{C.RESET}")
+    print(f"  {C.SEP_C}{SEP}{C.RESET}")
+    print(f"  {C.DIM}  Encoding   : {p.get('encoding','')}{C.RESET}")
+    print(f"  {C.DIM}  Line rate  : {p.get('line_rate','')}{C.RESET}")
+    print(f"  {C.DIM}  Standards  : {', '.join(p.get('standards',[]))}{C.RESET}")
+
+    # ── Frame Start ────────────────────────────────────────────────────────────
+    print(f"\n  {C.L1}{C.BOLD}  FRAME START MECHANISM{C.RESET}")
+    print(f"  {C.DIM}  Mechanism  : {fs.get('mechanism','')}{C.RESET}")
+
+    records: list[dict] = []
+    start_bytes = b''
+
+    if uses_preamble_sfd(speed_key):
+        # Low speed: Preamble + SFD with optional PHY start symbols shown
+        if speed_key == '100M':
+            print(f"  {C.L1}  100M J/K delimiter : {fs.get('j_symbol_bits','')} (J) + {fs.get('k_symbol_bits','')} (K) in 4B5B stream{C.RESET}")
+            print(f"  {C.DIM}  (J/K appear before preamble in 4B5B encoded stream){C.RESET}")
+        elif speed_key == '1G':
+            print(f"  {C.L1}  1G /S/ ordered set : K27.7 (0xFB) Start-of-Packet{C.RESET}")
+            print(f"  {C.DIM}  (Before preamble in 8b/10b stream at PCS level){C.RESET}")
+
+        section(f"LAYER 1 — Physical ({p.get('name','').split('(')[0].strip()})")
+        print(f"  {C.DIM}  Preamble: {fs.get('preamble_pattern','7 bytes 0x55 for clock sync')}{C.RESET}")
+        print(f"  {C.DIM}  SFD     : {fs.get('sfd_pattern','0xD5 = 10101011 marks MAC frame start')}{C.RESET}")
+
+        preamble_default = fs.get('preamble_hex','55555555555555').replace(' ','')
+        sfd_default      = fs.get('sfd_hex','D5').replace(' ','')
+        preamble = get_hex("Preamble  7 bytes (14 hex)", preamble_default, 7,
+                           help=f"Clock sync pattern. Default={preamble_default}. Press Enter=default.")
+        sfd      = get_hex("SFD       1 byte  ( 2 hex)", sfd_default, 1,
+                           help=f"Start Frame Delimiter. Default={sfd_default}. 0xD5=10101011.")
+        start_bytes = preamble + sfd
+        records += [
+            {"layer":1,"name":"Preamble","raw":preamble,
+             "user_val":preamble.hex(),"note":f"Clock sync ({speed_key} {p.get('encoding','')})"},
+            {"layer":1,"name":"SFD","raw":sfd,
+             "user_val":sfd.hex(),"note":"Frame boundary marker"},
+        ]
+
+    elif uses_start_block(speed_key) or uses_8b10b_sof(speed_key):
+        # High speed: show Start Block / SOF info (informational — no byte edit)
+        print(f"\n  {C.L1}  START BLOCK (control block — not part of MAC frame bytes):{C.RESET}")
+        if uses_start_block(speed_key):
+            sb = fs.get('start_ctrl_block', {})
+            print(f"  {C.HEX}  Sync header : {fs.get('sync_header_ctrl','10')} (control block){C.RESET}")
+            print(f"  {C.HEX}  Block Type  : {fs.get('start_block_type','0x78')} (Start-of-Frame in lane 0){C.RESET}")
+            if sb:
+                for k,v in list(sb.items())[:4]:
+                    print(f"  {C.DIM}  {k:<16}: {str(v)[:60]}{C.RESET}")
+        elif uses_8b10b_sof(speed_key):
+            sof_types = fs.get('sof_types',{})
+            print(f"  {C.L1}  FC SOF ordered set types:{C.RESET}")
+            for sof_name, sof_val in list(sof_types.items())[:5]:
+                print(f"    {C.HEX}  {sof_name:<8}: {sof_val}{C.RESET}")
+
+        print(f"\n  {C.DIM}  For {speed_key}: Start block is generated by NIC/HBA hardware{C.RESET}")
+        print(f"  {C.DIM}  MAC frame bytes (Preamble onwards) carried in Start block payload{C.RESET}")
+        section(f"LAYER 1 — Physical MAC Start ({speed_key})")
+        preamble_default = "55555555555555D5"
+        print(f"  {C.DIM}  Preamble+SFD encoded inside Start Block payload:{C.RESET}")
+        preamble = bytes.fromhex("55555555555555")
+        sfd      = bytes.fromhex("D5")
+        start_bytes = preamble + sfd
+        records += [
+            {"layer":1,"name":"Preamble","raw":preamble,
+             "user_val":"55×7","note":f"Inside {speed_key} Start Block payload"},
+            {"layer":1,"name":"SFD","raw":sfd,
+             "user_val":"D5","note":"Inside Start Block — hardware generated"},
+        ]
+
+    # ── Encoding detail ────────────────────────────────────────────────────────
+    if enc:
+        print(f"\n  {C.SECT}{C.BOLD}  ENCODING: {enc.get('scheme','')}{C.RESET}")
+        for k,v in list(enc.items())[:5]:
+            if k not in ('table','example_encoding'):
+                print(f"  {C.DIM}  {k:<22}: {str(v)[:65]}{C.RESET}")
+
+    # ── Control symbols ────────────────────────────────────────────────────────
+    if ctrl:
+        print(f"\n  {C.L1}  CONTROL SYMBOLS:{C.RESET}")
+        for sym, desc in list(ctrl.items())[:6]:
+            print(f"  {C.HEX}  {sym:<16}  {C.DIM}{desc}{C.RESET}")
+
+    # ── IFG ───────────────────────────────────────────────────────────────────
+    print(f"\n  {C.SECT}{C.BOLD}  INTER-FRAME GAP (IFG){C.RESET}")
+    min_bits = ifg_d.get('min_bits', 96)
+    pattern  = ifg_d.get('pattern', 'Idle')
+    purpose  = ifg_d.get('purpose', '')
+    print(f"  {C.DIM}  Minimum : {min_bits} bits{C.RESET}")
+    print(f"  {C.DIM}  Pattern : {pattern}{C.RESET}")
+    print(f"  {C.DIM}  Purpose : {purpose}{C.RESET}")
+
+    apply_ifg = input(f"\n  {C.PROMPT}Apply Inter-Frame Gap / Idle? (y/n) [default=y]: {C.RESET}").strip().lower() or 'y'
+    ifg_bytes = b''
+    if apply_ifg != 'n':
+        ifg_dur = input(f"  {C.PROMPT}IFG bits (Enter={min_bits}): {C.RESET}").strip() or str(min_bits)
+        try:    ifg_bit_count = int(ifg_dur)
+        except: ifg_bit_count = min_bits
+        ifg_byte_count = max(12, (ifg_bit_count + 7) // 8)
+        # Default IFG pattern based on speed
+        if speed_key == '10M':
+            ifg_bytes = b'\x00' * ifg_byte_count
+            ifg_note  = "No carrier (Manchester idle)"
+        elif speed_key in ('100M', '1G'):
+            ifg_bytes = b'\x1F' * ifg_byte_count   # approximation of IDLE symbol
+            ifg_note  = f"IDLE symbols (~{pattern[:30]})"
+        else:
+            ifg_bytes = b'\x00' * ifg_byte_count    # Idle blocks
+            ifg_note  = f"Idle blocks ({pattern[:30]})"
+        ifg_custom = input(f"  {C.PROMPT}Custom IFG pattern hex (Enter=default): {C.RESET}").strip()
+        if ifg_custom:
+            try:
+                custom_b = bytes.fromhex(ifg_custom.replace(' ',''))
+                ifg_bytes = custom_b
+                ifg_note  = "Custom IFG pattern"
+            except ValueError:
+                pass
+        if ifg_bytes:
+            records.append({"layer":1,"name":f"IFG ({ifg_bit_count}b)",
+                             "raw":ifg_bytes,"user_val":f"{len(ifg_bytes)}B",
+                             "note":ifg_note})
+
+    # ── PHY caution ───────────────────────────────────────────────────────────
+    caution = p.get('caution','')
+    if caution:
+        print(f"\n  {C.WARN}  ⚠  PHY CAUTION: {caution}{C.RESET}")
+
+    return start_bytes[:7], start_bytes[7:8] if len(start_bytes) >= 8 else b'\xD5', records
+
+
+def ask_phy_serial_encoding() -> dict:
+    """Ask user for serial PHY encoding selection and parameters."""
+    if not _PHY_AVAILABLE:
+        return {}
+    print(f"\n  {C.SECT}{C.BOLD}▌ SERIAL PHY ENCODING{C.RESET}")
+    print(f"  {C.SEP_C}{'─'*70}{C.RESET}")
+    for i, sp in enumerate(SERIAL_SPEED_MENU, 1):
+        print(f"  {C.L1}  [{i}]  {sp['label']:<35}  {C.DIM}{sp['encoding']}{C.RESET}")
+    ch = input(f"  {C.PROMPT}Choose (1-{len(SERIAL_SPEED_MENU)}) [default=1=NRZ]: {C.RESET}").strip() or '1'
+    try:
+        idx = max(0, min(int(ch)-1, len(SERIAL_SPEED_MENU)-1))
+    except ValueError:
+        idx = 0
+    key = SERIAL_SPEED_MENU[idx]['key']
+    p   = get_phy_info(key)
+    print(f"\n  {C.L1}  Selected: {p.get('name','')}{C.RESET}")
+    enc = get_encoding_detail(key)
+    for k,v in list(enc.items())[:4]:
+        print(f"  {C.DIM}  {k:<22}: {str(v)[:65]}{C.RESET}")
+    fs = get_start_mechanism(key)
+    fe = get_end_mechanism(key)
+    print(f"  {C.L1}  Frame start: {fs.get('mechanism','')}{C.RESET}")
+    print(f"  {C.L1}  Frame end  : {fe.get('mechanism','')}{C.RESET}")
+    return dict(key=key, info=p, encoding=enc, frame_start=fs, frame_end=fe)
+
+
 def ask_layer1_eth():
+    """
+    PHY-aware Layer 1 function.
+    If _ETH_PHY_SPEED is set (user chose PHY mode), delegates to show_phy_framing()
+    for speed-specific encoding, IFG, and control symbol display.
+    Otherwise uses traditional Preamble+SFD prompts.
+    """
+    global _ETH_PHY_SPEED
+    speed = _ETH_PHY_SPEED
+
+    if speed not in ('MAC_ONLY', '') and _PHY_AVAILABLE:
+        # PHY mode — delegate to full PHY framing display
+        preamble, sfd, _extra_records = show_phy_framing(speed)
+        return preamble, sfd
+
+    # MAC-only mode (default) — traditional prompt
     section("LAYER 1 — Physical (Preamble + SFD)")
     preamble = get_hex("Preamble  7 bytes (14 hex)","55555555555555",7,
         help="7 bytes of 0x55 transmitted before every Ethernet frame.\n"
              "Purpose: allows receiver hardware to synchronise its clock to the sender.\n"
              "Always 55 55 55 55 55 55 55 — changing this breaks clock recovery.")
+
     sfd = get_hex("SFD       1 byte  ( 2 hex)","d5",1,
         help="Start Frame Delimiter — 1 byte, always 0xD5 (10101011 in binary).\n"
              "Purpose: marks the EXACT boundary where the MAC frame begins.\n"
@@ -1471,116 +1723,431 @@ def build_ipv4(l4_payload,src_ip,dst_ip,ttl,ip_id,dscp,df,proto_num):
     return hdr,fields,ck
 
 def ask_l3_stp():
-    section("LAYER 3 — STP / RSTP BPDU")
-    version  =get("Version  0=STP  2=RSTP","2",help="0=STP(802.1D) slow 30-50s  2=RSTP(802.1w) fast <1s  3=MSTP")
-    bpdu_type=get("BPDU Type  00=Config  80=TCN","00",help="00=Config BPDU  80=Topology Change Notification  02=RSTP")
-    flags    =get("Flags (hex)","00",help="0x00=none  0x3C=RSTP Designated+Learning+Forwarding  bit0=TC  bit7=TCA")
-    root_prio=get("Root Priority","32768",help="0–61440 steps of 4096. Lower=more likely to be root. Default 32768.")
-    root_mac =get("Root MAC","00:00:00:00:00:00",help="MAC address component of the Root Bridge ID.")
-    path_cost=get("Root Path Cost","0",help="0=this IS the root.  100Mbps=19  1Gbps=4  10Gbps=2")
-    br_prio  =get("Bridge Priority","32768",help="Priority of THIS bridge. Steps of 4096, default 32768.")
-    br_mac   =get("Bridge MAC","00:11:22:33:44:55",help="MAC address of THIS bridge (the switch sending this BPDU).")
-    port_id  =get("Port ID (hex)","8001",help="0x8001=prio128 port1. Used to break ties on same-bridge ports.")
-    msg_age  =get("Message Age (sec)","0",help="0=generated by root. Incremented by 1 at each bridge hop.")
-    max_age  =get("Max Age (sec)","20",help="Default 20s. BPDU discarded after this time if not refreshed.")
-    hello    =get("Hello Time (sec)","2",help="Root sends hello every 2s. Faster detection = lower value.")
-    fwd_delay=get("Forward Delay (sec)","15",help="Time in Listening/Learning states before Forwarding (default 15s).")
-    return (version,bpdu_type,flags,root_prio,root_mac,path_cost,br_prio,br_mac,port_id,msg_age,max_age,hello,fwd_delay)
+    """
+    STP / RSTP / MSTP / PVST+ BPDU builder.
+    Asks every field with caution notes. Detects version and builds
+    correct BPDU format for each: STP(802.1D), RSTP(802.1w),
+    MSTP(802.1s), PVST+(Cisco) and Rapid-PVST+.
+    """
+    section("LAYER 3 — STP / RSTP / MSTP / PVST+  BPDU")
+    print(f"  {C.DIM}  Protocol variants:{C.RESET}")
+    print(f"  {C.DIM}  0=IEEE STP (802.1D-1998)  — 30-50s convergence, one tree, all VLANs{C.RESET}")
+    print(f"  {C.DIM}  2=IEEE RSTP (802.1w)      — <1s convergence, one tree, all VLANs{C.RESET}")
+    print(f"  {C.DIM}  3=IEEE MSTP (802.1s)      — multiple instances, each covers group of VLANs{C.RESET}")
+    print(f"  {C.DIM}  C=Cisco PVST+             — per-VLAN STP (0x8100 tagged, SNAP 00:00:0C:01:07){C.RESET}")
+    print(f"  {C.DIM}  R=Cisco Rapid-PVST+       — per-VLAN RSTP (0x8100 tagged, SNAP 00:00:0C:01:07){C.RESET}")
+    print(f"  {C.SEP_C}{'─'*76}{C.RESET}")
+
+    version = get("Version  0=STP  2=RSTP  3=MSTP  C=PVST+  R=Rapid-PVST+", "2",
+        help="0=IEEE STP  2=IEEE RSTP  3=IEEE MSTP  C=Cisco PVST+  R=Cisco Rapid-PVST+")
+
+    # PVST / Rapid-PVST — Cisco per-VLAN variant
+    if version.upper() in ('C','R'):
+        vlan_id = get("PVST+ VLAN ID (1-4094)", "1",
+            help="Each VLAN has its own STP instance in PVST+. VLAN 1 uses native VLAN.")
+        pvst_ver = "2" if version.upper() == 'R' else "0"
+        print(f"  {C.WARN}  ⚠  PVST+ uses SNAP encapsulation (00:00:0C:01:07) + 802.1Q tag{C.RESET}")
+        print(f"  {C.WARN}     Dst MAC: 01:00:0C:CC:CC:CD (PVST multicast — differs from IEEE STP){C.RESET}")
+        bpdu_type = "00"
+        flags = get("BPDU Flags (hex)", "3c" if version.upper()=='R' else "00",
+            help="0x00=STP-Config  0x3C=RSTP(Desg+Learn+Fwd)  bit0=TC  bit7=TCA")
+    else:
+        vlan_id = None
+        bpdu_type = get("BPDU Type  00=Config  80=TCN  02=RSTP/MST", "00" if version=="0" else "02",
+            help="0x00=Configuration BPDU  0x80=TCN  0x02=RSTP/MST Config")
+        flags = get("BPDU Flags (hex)", "00" if version=="0" else "3c",
+            help="bit0=TC  bit1=Proposal  bit2-3=PortRole(01=Alt 10=Root 11=Desg)  "
+                 "bit4=Learning  bit5=Forwarding  bit6=Agreement  bit7=TCA\n"
+                 "0x00=plain STP  0x3C=RSTP Designated+Learning+Forwarding")
+
+    print(f"  {C.WARN}  ⚠  Root Bridge ID: lower priority = more likely elected as root{C.RESET}")
+    root_prio = get("Root Bridge Priority (steps of 4096)", "32768",
+        help="0/4096/8192…57344/61440. Default=32768. Lower=preferred root. "
+             "0=highest priority (always root if reachable).")
+    root_sys_ext = get("Root System ID Extension (VLAN/MSTI, 0-4095)", "0",
+        help="12-bit extension: PVST+=VLAN-ID, MSTP=MSTI (instance 0=CIST). "
+             "Combined with priority: BridgeID = priority(4b)+sysExt(12b)+MAC(48b).")
+    root_mac = get("Root Bridge MAC", "00:00:00:00:00:00",
+        help="MAC address of root bridge. 00:00:00:00:00:00 = this bridge IS the root.")
+    path_cost = get("Root Path Cost", "0",
+        help="0=this bridge is root. 10Mbps=100 100Mbps=19 1Gbps=4 10Gbps=2 "
+             "100Gbps=1 (802.1D-2004 short costs).")
+    print(f"  {C.WARN}  ⚠  Bridge ID: must be lower priority than root to be non-root{C.RESET}")
+    br_prio = get("Bridge Priority", "32768",
+        help="Priority of THIS bridge sending this BPDU. Must be ≤ root priority "
+             "for this to be the root.")
+    br_sys_ext = get("Bridge System ID Extension", "0",
+        help="VLAN ID (PVST+) or MSTI (MSTP). Same rules as Root Sys ID Extension.")
+    br_mac = get("Bridge MAC", "00:11:22:33:44:55",
+        help="Unique MAC of THIS bridge. Used to break priority ties.")
+    port_id = get("Port ID (hex)", "8001",
+        help="High byte=port priority (default 0x80=128), low byte=port number. "
+             "e.g. 0x8001=priority128 port1. Lower port priority = preferred path.")
+    msg_age = get("Message Age (1/256 sec units, enter seconds)", "0",
+        help="0=generated by root. Each hop adds 1. Discarded when msg_age >= max_age.")
+    max_age = get("Max Age (sec)", "20",
+        help="Default 20s. Topology recalculated if BPDU not received within max_age.")
+    hello = get("Hello Time (sec)", "2",
+        help="Root sends Config BPDU every hello_time seconds. Default 2s.")
+    fwd_delay = get("Forward Delay (sec)", "15",
+        help="Time spent in Listening+Learning states (STP only). Default 15s. "
+             "RSTP ignores this for edge/point-to-point links.")
+    print(f"  {C.WARN}  ⚠  RSTP uses Proposal/Agreement — fwd_delay only used for legacy fallback{C.RESET}")
+
+    # MSTP-specific fields
+    mstp_name = ""
+    mstp_rev  = "0"
+    mstp_digest = "0"*32
+    mstp_msti = []
+    if version == "3":
+        section("MSTP — MST Configuration Identification")
+        print(f"  {C.DIM}  All bridges in the same MST Region must have identical: Name+Revision+VLAN-mapping-digest{C.RESET}")
+        mstp_name = get("MST Region Name (32 chars)", "MST-REGION-1",
+            help="Up to 32 ASCII chars — all bridges must match exactly (case-sensitive).")
+        mstp_rev  = get("MST Revision Level (0-65535)", "0",
+            help="Revision number. Bridges must match to be in same region.")
+        mstp_digest = get("MST VLAN-mapping digest (32B hex)", "00"*16,
+            help="MD5 hash of VLAN-to-instance mapping table. Same across all region members.")
+        print(f"  {C.WARN}  ⚠  Digest mismatch = bridges form separate MST regions (topology partition){C.RESET}")
+        n_msti = get("Number of MSTI records (0-64)", "1")
+        for i in range(int(n_msti)):
+            section(f"MSTI {i+1} Record")
+            msti_prio = get(f"MSTI {i+1} Regional Root Priority", "32768")
+            msti_mac  = get(f"MSTI {i+1} Regional Root MAC", "00:00:00:00:00:00")
+            msti_cost = get(f"MSTI {i+1} Internal Path Cost", "0")
+            msti_bprio= get(f"MSTI {i+1} Bridge Priority", "32768")
+            msti_port = get(f"MSTI {i+1} Port Priority (hex)", "80")
+            msti_flags= get(f"MSTI {i+1} Flags", "00")
+            msti_rem  = get(f"MSTI {i+1} Remaining Hops", "20")
+            mstp_msti.append((msti_prio,msti_mac,msti_cost,msti_bprio,msti_port,msti_flags,msti_rem))
+
+    return (version,vlan_id,bpdu_type,flags,root_prio,root_sys_ext,root_mac,path_cost,
+            br_prio,br_sys_ext,br_mac,port_id,msg_age,max_age,hello,fwd_delay,
+            mstp_name,mstp_rev,mstp_digest,mstp_msti)
+
 
 def build_stp(inputs):
-    (version,bpdu_type,flags,root_prio,root_mac,path_cost,br_prio,br_mac,port_id,msg_age,max_age,hello,fwd_delay)=inputs
-    root_id=struct.pack("!H",int(root_prio))+mac_b(root_mac)
-    br_id  =struct.pack("!H",int(br_prio))  +mac_b(br_mac)
-    bpdu=(bytes.fromhex("0000")+hpad(version,1)+hpad(bpdu_type,1)+hpad(flags,1)+
-          root_id+struct.pack("!I",int(path_cost))+br_id+hpad(port_id,2)+
-          struct.pack("!HHHH",int(msg_age)*256,int(max_age)*256,int(hello)*256,int(fwd_delay)*256))
-    fields=[
-        {"layer":3,"name":"BPDU Protocol ID","raw":bpdu[0:2],"user_val":"0x0000","note":"always 0"},
-        {"layer":3,"name":"BPDU Version","raw":bpdu[2:3],"user_val":version,"note":"0=STP 2=RSTP"},
-        {"layer":3,"name":"BPDU Type","raw":bpdu[3:4],"user_val":bpdu_type,"note":"00=Config 80=TCN"},
-        {"layer":3,"name":"BPDU Flags","raw":bpdu[4:5],"user_val":flags,"note":""},
-        {"layer":3,"name":"BPDU Root ID","raw":bpdu[5:13],"user_val":f"prio={root_prio} mac={root_mac}","note":"8B"},
-        {"layer":3,"name":"BPDU Root Path Cost","raw":bpdu[13:17],"user_val":path_cost,"note":""},
-        {"layer":3,"name":"BPDU Bridge ID","raw":bpdu[17:25],"user_val":f"prio={br_prio} mac={br_mac}","note":"8B"},
-        {"layer":3,"name":"BPDU Port ID","raw":bpdu[25:27],"user_val":port_id,"note":""},
-        {"layer":3,"name":"BPDU Message Age","raw":bpdu[27:29],"user_val":msg_age,"note":"sec"},
-        {"layer":3,"name":"BPDU Max Age","raw":bpdu[29:31],"user_val":max_age,"note":"sec"},
-        {"layer":3,"name":"BPDU Hello Time","raw":bpdu[31:33],"user_val":hello,"note":"sec"},
-        {"layer":3,"name":"BPDU Forward Delay","raw":bpdu[33:35],"user_val":fwd_delay,"note":"sec"},
+    (version,vlan_id,bpdu_type,flags,root_prio,root_sys_ext,root_mac,path_cost,
+     br_prio,br_sys_ext,br_mac,port_id,msg_age,max_age,hello,fwd_delay,
+     mstp_name,mstp_rev,mstp_digest,mstp_msti) = inputs
+
+    # Build Bridge IDs with system ID extension
+    def make_bridge_id(prio_s, sys_ext_s, mac_s):
+        prio = int(prio_s) & 0xF000
+        ext  = int(sys_ext_s) & 0x0FFF
+        return struct.pack("!H", prio | ext) + mac_b(mac_s)
+
+    root_id = make_bridge_id(root_prio, root_sys_ext, root_mac)
+    br_id   = make_bridge_id(br_prio,   br_sys_ext,   br_mac)
+
+    # BPDU payload (version-aware)
+    proto_id  = bytes.fromhex("0000")
+    ver_b     = hpad("03" if version=="3" else ("02" if version in("2","R") else "00"), 1)
+    btype_b   = hpad("02" if version in("2","3","R") else bpdu_type, 1)
+    flags_b   = hpad(flags, 1)
+    cost_b    = struct.pack("!I", int(path_cost))
+    port_b    = hpad(port_id, 2)
+    # Timers — 1/256 second units
+    def timer(sec): return struct.pack("!H", int(float(sec)*256))
+
+    bpdu = (proto_id + ver_b + btype_b + flags_b +
+            root_id + cost_b + br_id + port_b +
+            timer(msg_age) + timer(max_age) + timer(hello) + timer(fwd_delay))
+
+    # RSTP Version 1 length field
+    if version in ("2","R"):
+        bpdu += bytes.fromhex("0000")   # Version1Length=0
+
+    # MSTP additions (IEEE 802.1s / 802.1Q-2005 Section 13)
+    mstp_extra = b""
+    if version == "3":
+        # MST Config ID (51B): Format=1B + Name=32B + Revision=2B + Digest=16B
+        name_b = mstp_name.encode("ascii")[:32].ljust(32, b'\x00')
+        rev_b  = struct.pack("!H", int(mstp_rev))
+        digest_b = bytes.fromhex((mstp_digest+"00"*32)[:32])
+        mst_config_id = bytes([0x00]) + name_b + rev_b + digest_b  # 51B
+        # CIST Internal Root Path Cost (4B) + CIST Bridge ID (8B) + Remaining Hops (1B)
+        cist_internal_cost = struct.pack("!I", 0)
+        cist_bridge_id     = br_id
+        cist_hops          = bytes([20])
+        mstp_extra = mst_config_id + cist_internal_cost + cist_bridge_id + cist_hops
+        # MSTI Config Messages (16B each)
+        for (mp,mm,mc,mbp,mpo,mfl,mr) in mstp_msti:
+            msti_root = make_bridge_id(mp,"0",mm)
+            mstp_extra += (hpad(mfl,1) + msti_root +
+                           struct.pack("!I",int(mc)) +
+                           hpad(mbp,1) + hpad(mpo,1) + hpad(mr,1) + bytes([0]))
+        # Version3Length
+        v3len = struct.pack("!H", len(mstp_extra))
+        bpdu += bytes.fromhex("0000") + v3len + mstp_extra  # V1Len + V3Len + data
+
+    # PVST+ adds SNAP + VLAN TLV (0x00 0x00 VID_high VID_low 0x00)
+    pvst_snap = b""
+    pvst_vlan_tlv = b""
+    if vlan_id is not None:
+        pvst_snap    = bytes.fromhex("aaaa03") + bytes.fromhex("00000c") + bytes.fromhex("010b")
+        vid          = int(vlan_id)
+        pvst_vlan_tlv= bytes.fromhex("0000") + struct.pack("!H", vid) + bytes.fromhex("00")
+
+    fields = [
+        {"layer":3,"name":"BPDU Protocol ID","raw":proto_id,"user_val":"0x0000","note":"IEEE STP always 0"},
+        {"layer":3,"name":"BPDU Version",    "raw":ver_b,   "user_val":version,"note":"0=STP 2=RSTP 3=MSTP"},
+        {"layer":3,"name":"BPDU Type",       "raw":btype_b, "user_val":bpdu_type,"note":"00=Config 80=TCN 02=RSTP"},
+        {"layer":3,"name":"BPDU Flags",      "raw":flags_b, "user_val":flags,
+         "note":"bit0=TC bit1=Proposal bit2-3=Role bit4=Learn bit5=Fwd bit6=Agree bit7=TCA"},
+        {"layer":3,"name":"Root Bridge ID",  "raw":root_id, "user_val":f"prio={root_prio}+ext={root_sys_ext} mac={root_mac}",
+         "note":"8B priority+sysExt+MAC"},
+        {"layer":3,"name":"Root Path Cost",  "raw":cost_b,  "user_val":path_cost,"note":"0=this is root"},
+        {"layer":3,"name":"Bridge ID",       "raw":br_id,   "user_val":f"prio={br_prio}+ext={br_sys_ext} mac={br_mac}","note":"8B"},
+        {"layer":3,"name":"Port ID",         "raw":port_b,  "user_val":port_id,"note":"prio(8b)+portnum(8b)"},
+        {"layer":3,"name":"Message Age",     "raw":bpdu[27:29],"user_val":msg_age,"note":"÷256 = seconds"},
+        {"layer":3,"name":"Max Age",         "raw":bpdu[29:31],"user_val":max_age,"note":"÷256 = seconds"},
+        {"layer":3,"name":"Hello Time",      "raw":bpdu[31:33],"user_val":hello,"note":"÷256 = seconds"},
+        {"layer":3,"name":"Forward Delay",   "raw":bpdu[33:35],"user_val":fwd_delay,"note":"÷256 = seconds"},
     ]
-    return bpdu,fields
+    if version in ("2","R"):
+        fields.append({"layer":3,"name":"Version1 Length","raw":bpdu[35:37],"user_val":"0","note":"RSTP: 0"})
+    if version == "3" and mstp_extra:
+        fields.append({"layer":3,"name":"MST Config ID","raw":mstp_extra[:51],"user_val":mstp_name,"note":"51B MST region identifier"})
+        fields.append({"layer":3,"name":"MSTP Extra","raw":mstp_extra[51:],"user_val":f"{len(mstp_extra)-51}B","note":"CIST+MSTI records"})
+    if pvst_snap:
+        fields.insert(0,{"layer":3,"name":"PVST+ SNAP HDR","raw":pvst_snap,"user_val":"AA:AA:03:00:00:0C:01:0B","note":"Cisco PVST SNAP"})
+    if pvst_vlan_tlv:
+        fields.append({"layer":3,"name":"PVST+ VLAN TLV","raw":pvst_vlan_tlv,"user_val":f"VLAN {vlan_id}","note":"5B VLAN tag"})
+    return pvst_snap + bpdu + pvst_vlan_tlv, fields
+
 
 def ask_l3_dtp():
-    section("LAYER 3 — DTP  (Dynamic Trunking Protocol)")
-    print("    Modes:  02=desirable  03=auto  04=on  05=off")
-    mode=get("DTP Mode (hex)","02",help="02=desirable  03=auto  04=on  05=off\nCisco proprietary — disable with 'switchport nonegotiate'")
-    return mode
+    section("LAYER 3 — DTP  (Dynamic Trunking Protocol — Cisco Proprietary)")
+    print(f"  {C.DIM}  DTP negotiates trunk encapsulation (802.1Q / ISL) and mode between Cisco switches.{C.RESET}")
+    print(f"  {C.WARN}  ⚠  SECURITY: disable DTP with 'switchport nonegotiate' on all access/untrusted ports{C.RESET}")
+    print(f"  {C.SEP_C}{'─'*70}{C.RESET}")
+    mode = get("DTP Mode (hex)", "02",
+        help="0x01=Trunk-On  0x02=Desirable  0x03=Auto  0x04=Access-On  0x05=Off\n"
+             "Desirable+Auto or Desirable+Desirable → trunk forms\n"
+             "Auto+Auto → no trunk (both passive)")
+    neighbor_mac = get("Neighbor MAC (switch sending DTP)", "00:11:22:33:44:55",
+        help="MAC address of THIS switch port — included in TLV 0x01 (Domain)")
+    domain = get("DTP Domain (hex, 1B)", "01",
+        help="0x01=default Cisco domain. Must match between switches for trunking.")
+    encap = get("Encap type (hex)", "05",
+        help="0x05=802.1Q  0xA5=ISL  0xB5=802.1Q+ISL-auto\n"
+             "Modern switches use 802.1Q only.")
+    mode_s = {"01":"Trunk-On","02":"Desirable","03":"Auto","04":"Access-On","05":"Off"}.get(mode,f"0x{mode}")
+    return mode, neighbor_mac, domain, encap, mode_s
 
-def build_dtp(mode):
-    snap=bytes.fromhex("00000c0104"); payload=b"\x01\x03\x01"+hpad(mode,1)+b"\x00"*26
-    mode_s={"02":"desirable","03":"auto","04":"on","05":"off"}.get(mode,f"0x{mode}")
-    fields=[
-        {"layer":3,"name":"DTP SNAP OUI","raw":snap[0:3],"user_val":"00000c","note":"Cisco"},
-        {"layer":3,"name":"DTP SNAP PID","raw":snap[3:5],"user_val":"0104","note":"DTP"},
-        {"layer":3,"name":"DTP Version","raw":payload[0:1],"user_val":"1","note":""},
-        {"layer":3,"name":"DTP Flags","raw":payload[1:2],"user_val":"03","note":""},
-        {"layer":3,"name":"DTP Domain","raw":payload[2:3],"user_val":"01","note":""},
-        {"layer":3,"name":"DTP Mode","raw":payload[3:4],"user_val":mode,"note":mode_s},
-        {"layer":3,"name":"DTP Pad","raw":payload[4:],"user_val":"0x00*26","note":""},
+
+def build_dtp(inputs):
+    mode, neighbor_mac, domain, encap, mode_s = inputs
+    snap     = bytes.fromhex("aaaa03") + bytes.fromhex("00000c") + bytes.fromhex("2004")
+    # TLVs: Type(2B)+Length(2B)+Value
+    # TLV 0x01: Domain (5B value = 4B domain + 1B pad)
+    tlv_domain  = struct.pack("!HH",0x0001,5) + hpad(domain,1)*4 + bytes([0])
+    # TLV 0x02: Status (5B = 1B mode + 4B neighbor)
+    tlv_status  = struct.pack("!HH",0x0002,5) + hpad(mode,1) + mac_b(neighbor_mac)[:4]
+    # TLV 0x03: DTP Type / Encap
+    tlv_type    = struct.pack("!HH",0x0003,5) + hpad(encap,1) + bytes([0])*4
+    # TLV 0x04: Neighbor (6B MAC)
+    tlv_neighbor= struct.pack("!HH",0x0004,6) + mac_b(neighbor_mac)
+    dtp_payload = tlv_domain + tlv_status + tlv_type + tlv_neighbor
+    raw = snap + dtp_payload
+    fields = [
+        {"layer":3,"name":"DTP DSAP","raw":snap[0:1],"user_val":"AA","note":"SNAP"},
+        {"layer":3,"name":"DTP SSAP","raw":snap[1:2],"user_val":"AA","note":"SNAP"},
+        {"layer":3,"name":"DTP Control","raw":snap[2:3],"user_val":"03","note":"UI"},
+        {"layer":3,"name":"DTP SNAP OUI","raw":snap[3:6],"user_val":"00:00:0C","note":"Cisco"},
+        {"layer":3,"name":"DTP SNAP PID","raw":snap[6:8],"user_val":"0x2004","note":"DTP"},
+        {"layer":3,"name":"TLV Domain Type","raw":tlv_domain[0:2],"user_val":"0001","note":"Domain"},
+        {"layer":3,"name":"TLV Domain Len","raw":tlv_domain[2:4],"user_val":"5","note":"bytes"},
+        {"layer":3,"name":"TLV Domain Val","raw":tlv_domain[4:],"user_val":domain,"note":"domain ID"},
+        {"layer":3,"name":"TLV Status Type","raw":tlv_status[0:2],"user_val":"0002","note":"Status"},
+        {"layer":3,"name":"TLV Status Mode","raw":tlv_status[4:5],"user_val":mode,"note":mode_s},
+        {"layer":3,"name":"TLV Encap Type","raw":tlv_type[0:2],"user_val":"0003","note":"Encap"},
+        {"layer":3,"name":"TLV Encap Val","raw":tlv_type[4:5],"user_val":encap,"note":"05=802.1Q A5=ISL"},
+        {"layer":3,"name":"TLV Neighbor MAC","raw":tlv_neighbor[4:],"user_val":neighbor_mac,"note":"6B"},
     ]
-    return snap+payload,fields
+    return raw, fields
+
 
 def ask_l3_pagp():
-    section("LAYER 3 — PAgP  (Port Aggregation Protocol)")
-    print("    Port State flags: 0x01=Active 0x04=Consistent 0x05=Active+Consistent")
-    state=get("Port State (hex)","05",help="0x05=Active+Consistent (normal)  0x01=Active  0x00=Inactive")
-    return state
+    section("LAYER 3 — PAgP  (Port Aggregation Protocol — Cisco EtherChannel)")
+    print(f"  {C.DIM}  PAgP negotiates EtherChannel (LAG) formation between Cisco switches.{C.RESET}")
+    print(f"  {C.DIM}  EtherChannel bundles 2-8 ports into one logical link for bandwidth+redundancy.{C.RESET}")
+    print(f"  {C.WARN}  ⚠  PAgP is Cisco-proprietary — use LACP (802.3ad) for multi-vendor LAG{C.RESET}")
+    print(f"  {C.SEP_C}{'─'*70}{C.RESET}")
+    state = get("Port State (hex)", "41",
+        help="8-bit flags:\n"
+             "  bit0=Active  bit1=Slow-Hello  bit2=AgPort  bit3=Consistent\n"
+             "  bit4=IfAutomatic  bit5=PartnerLearnEnable  bit6=Reserved  bit7=AllPortsUp\n"
+             "  0x01=Active  0x41=Active+AgPort  0x45=Active+AgPort+Consistent")
+    group_cap = get("Group Capability (hex 4B)", "00000001",
+        help="4-byte group capability — ports must match to bundle. "
+             "Cisco uses speed+duplex+media encoding.")
+    group_ifidx = get("Group If Index (hex 4B)", "00000001",
+        help="Interface index of this port in the switch. Used to identify port in EtherChannel.")
+    port_name = get("Port Name (ASCII, max 16B)", "Fa0/1",
+        help="Interface name — e.g. Fa0/1, Gi0/1, Te1/1")
+    device_id = get("Device ID MAC", "00:11:22:33:44:55",
+        help="MAC address identifying THIS device — used by peer to identify the switch.")
+    learn = get("Learn Method (hex)", "01",
+        help="0x00=Source-based  0x01=Address-based(normal). "
+             "Both sides must match — mismatch = traffic sent to wrong port in bundle.")
+    return state, group_cap, group_ifidx, port_name, device_id, learn
 
-def build_pagp(state):
-    snap=bytes.fromhex("00000c0104")
-    payload=(b"\x01\x01"+bytes.fromhex("8001")+bytes.fromhex("00000001")+hpad(state,1)+b"\x00"*25)
-    fields=[
-        {"layer":3,"name":"PAgP SNAP OUI","raw":snap[0:3],"user_val":"00000c","note":"Cisco"},
-        {"layer":3,"name":"PAgP SNAP PID","raw":snap[3:5],"user_val":"0104","note":"PAgP"},
+
+def build_pagp(inputs):
+    state, group_cap, group_ifidx, port_name, device_id, learn = inputs
+    snap = bytes.fromhex("aaaa03") + bytes.fromhex("00000c") + bytes.fromhex("0104")
+    # PAgP PDU structure
+    version   = bytes([0x01])
+    flags_b   = hpad(state, 1)
+    # TLVs
+    grp_cap_b = bytes.fromhex((group_cap+"00000000")[:8])
+    grp_if_b  = bytes.fromhex((group_ifidx+"00000000")[:8])
+    pname_b   = port_name.encode("ascii")[:16].ljust(16, b'\x00')
+    devid_b   = mac_b(device_id)
+    learn_b   = hpad(learn, 1)
+    pad       = b'\x00' * 3
+    payload   = version + flags_b + grp_cap_b + grp_if_b + devid_b + learn_b + pad + pname_b
+    raw = snap + payload
+    fields = [
+        {"layer":3,"name":"PAgP DSAP","raw":snap[0:1],"user_val":"AA","note":"SNAP SAP"},
+        {"layer":3,"name":"PAgP SSAP","raw":snap[1:2],"user_val":"AA","note":"SNAP SAP"},
+        {"layer":3,"name":"PAgP Control","raw":snap[2:3],"user_val":"03","note":"UI"},
+        {"layer":3,"name":"PAgP SNAP OUI","raw":snap[3:6],"user_val":"00:00:0C","note":"Cisco"},
+        {"layer":3,"name":"PAgP SNAP PID","raw":snap[6:8],"user_val":"0x0104","note":"PAgP"},
         {"layer":3,"name":"PAgP Version","raw":payload[0:1],"user_val":"1","note":""},
-        {"layer":3,"name":"PAgP Flags","raw":payload[1:2],"user_val":"01","note":""},
-        {"layer":3,"name":"PAgP Port ID","raw":payload[2:4],"user_val":"8001","note":""},
-        {"layer":3,"name":"PAgP System ID","raw":payload[4:8],"user_val":"00000001","note":""},
-        {"layer":3,"name":"PAgP Port State","raw":payload[8:9],"user_val":state,"note":""},
-        {"layer":3,"name":"PAgP Pad","raw":payload[9:],"user_val":"0x00*25","note":""},
+        {"layer":3,"name":"PAgP Flags","raw":payload[1:2],"user_val":state,
+         "note":"Active+AgPort+Consistent etc."},
+        {"layer":3,"name":"PAgP Group Capability","raw":payload[2:6],"user_val":group_cap,
+         "note":"must match peer to bundle"},
+        {"layer":3,"name":"PAgP Group IfIndex","raw":payload[6:10],"user_val":group_ifidx,"note":""},
+        {"layer":3,"name":"PAgP Device ID","raw":payload[10:16],"user_val":device_id,"note":"switch MAC"},
+        {"layer":3,"name":"PAgP Learn Method","raw":payload[16:17],"user_val":learn,
+         "note":"01=addr-based; must match peer"},
+        {"layer":3,"name":"PAgP Pad","raw":payload[17:20],"user_val":"000000","note":""},
+        {"layer":3,"name":"PAgP Port Name","raw":payload[20:36],"user_val":port_name,"note":"16B ASCII"},
     ]
-    return snap+payload,fields
+    return raw, fields
+
 
 def ask_l3_lacp():
-    section("LAYER 3 — LACP  (802.3ad Link Aggregation)")
-    actor_mac  =get("Actor System MAC","00:11:22:33:44:55",help="MAC address of THIS switch/NIC participating in LACP.")
-    actor_key  =get("Actor Key (hex)","0001",help="2-byte operational key — ports with same key form one LAG.")
-    actor_state=get("Actor State (hex)  [3d=Active+Short+Aggregating+Sync+Col+Dist]","3d",
-        help="8-bit LACP state: bit0=Active bit1=Short-timeout bit2=Aggregation\n"
-             "bit3=Synchronisation bit4=Collecting bit5=Distributing\n"
-             "0x3D=00111101=Active+Short+Agg+Sync+Col+Dist")
-    return actor_mac,actor_key,actor_state
+    section("LAYER 3 — LACP  (IEEE 802.3ad/802.1AX Link Aggregation Control Protocol)")
+    print(f"  {C.DIM}  LACP is the IEEE standard for LAG/EtherChannel — works across all vendors.{C.RESET}")
+    print(f"  {C.DIM}  Both Actor (local) and Partner (remote) TLVs are included in every PDU.{C.RESET}")
+    print(f"  {C.SEP_C}{'─'*70}{C.RESET}")
 
-def build_lacp(actor_mac,actor_key,actor_state):
-    subtype_ver=b"\x01\x01"
-    tlv=(b"\x01\x14"+bytes.fromhex("8000")+mac_b(actor_mac)+
-         hpad(actor_key,2)+bytes.fromhex("80008001")+hpad(actor_state,1)+b"\x00\x00\x00")
-    terminator=b"\x00\x00"; raw=subtype_ver+tlv+terminator
-    fields=[
-        {"layer":3,"name":"LACP Subtype","raw":raw[0:1],"user_val":"1","note":"LACP"},
-        {"layer":3,"name":"LACP Version","raw":raw[1:2],"user_val":"1","note":""},
-        {"layer":3,"name":"LACP Actor TLV Type","raw":raw[2:3],"user_val":"01","note":"Actor Info"},
-        {"layer":3,"name":"LACP Actor TLV Len","raw":raw[3:4],"user_val":"20","note":"bytes=20"},
-        {"layer":3,"name":"LACP Actor Sys Prio","raw":raw[4:6],"user_val":"8000","note":"32768"},
-        {"layer":3,"name":"LACP Actor Sys MAC","raw":raw[6:12],"user_val":actor_mac,"note":""},
-        {"layer":3,"name":"LACP Actor Key","raw":raw[12:14],"user_val":actor_key,"note":""},
-        {"layer":3,"name":"LACP Actor Port Prio","raw":raw[14:16],"user_val":"8000","note":""},
-        {"layer":3,"name":"LACP Actor Port","raw":raw[16:18],"user_val":"8001","note":""},
-        {"layer":3,"name":"LACP Actor State","raw":raw[18:19],"user_val":actor_state,"note":"0x3d=Active+Sync+Agg"},
-        {"layer":3,"name":"LACP Actor Reserved","raw":raw[19:22],"user_val":"000000","note":""},
-        {"layer":3,"name":"LACP Terminator","raw":raw[22:24],"user_val":"0000","note":""},
+    section("LACP ACTOR TLV (this port's information)")
+    actor_sys_prio = get("Actor System Priority", "32768",
+        help="0-65535. Lower=higher priority. Used in LACP system election. Default 32768.")
+    actor_mac      = get("Actor System MAC", "00:11:22:33:44:55",
+        help="MAC of THIS system (switch/NIC). Combined with priority = System ID.")
+    actor_key      = get("Actor Operational Key (hex 2B)", "0001",
+        help="Ports with same key on same system can bundle. "
+             "Key encodes speed+duplex: 1Gbps=0x0001 10Gbps=0x0002 25Gbps=0x0003.")
+    actor_port_prio= get("Actor Port Priority", "32768",
+        help="0-65535. Lower priority port selected first into LAG if >max-bundle-links.")
+    actor_port     = get("Actor Port Number (hex 2B)", "0001",
+        help="Interface number (1-based). Must be unique per system+key.")
+    actor_state    = get("Actor State (hex)", "3d",
+        help="8-bit LACP state bitmap:\n"
+             "  bit0=LACP_Activity(1=Active 0=Passive)\n"
+             "  bit1=LACP_Timeout(1=Short/1s 0=Long/30s)\n"
+             "  bit2=Aggregation(1=can-aggregate)\n"
+             "  bit3=Synchronization(1=in-sync-with-partner)\n"
+             "  bit4=Collecting(1=collecting frames from partner)\n"
+             "  bit5=Distributing(1=distributing frames to partner)\n"
+             "  bit6=Defaulted(1=using default partner info)\n"
+             "  bit7=Expired(1=LACP expired state)\n"
+             "  0x3D=00111101=Active+Short+Agg+Sync+Col+Dist(normal active)\n"
+             "  0x07=00000111=Active+Short+Agg (negotiating)")
+    print(f"  {C.WARN}  ⚠  Both ends must be Active or one Active+one Passive — Passive+Passive = no LAG{C.RESET}")
+
+    section("LACP PARTNER TLV (remote port's information)")
+    partner_sys_prio = get("Partner System Priority", "32768")
+    partner_mac      = get("Partner System MAC", "00:aa:bb:cc:dd:ee",
+        help="MAC of the REMOTE switch/NIC this port is connected to.")
+    partner_key      = get("Partner Operational Key (hex 2B)", "0001",
+        help="Key reported by partner. Must match actor key for bundle to form.")
+    partner_port_prio= get("Partner Port Priority", "32768")
+    partner_port     = get("Partner Port Number (hex 2B)", "0001")
+    partner_state    = get("Partner State (hex)", "3d",
+        help="Same state bits as Actor State — reflects what partner told us.")
+    print(f"  {C.WARN}  ⚠  Synchronization bit(3) must=1 on BOTH actor and partner for LAG to pass traffic{C.RESET}")
+
+    section("LACP COLLECTOR TLV (frame collection delay)")
+    collector_max_delay = get("Collector Max Delay (hex 2B, units=10µs)", "ffff",
+        help="Maximum delay the collector can impose. 0xFFFF=65535×10µs=655ms. "
+             "0x0000=no delay imposed.")
+
+    return (actor_sys_prio, actor_mac, actor_key, actor_port_prio, actor_port, actor_state,
+            partner_sys_prio, partner_mac, partner_key, partner_port_prio, partner_port, partner_state,
+            collector_max_delay)
+
+
+def build_lacp(inputs):
+    (actor_sys_prio, actor_mac, actor_key, actor_port_prio, actor_port, actor_state,
+     partner_sys_prio, partner_mac, partner_key, partner_port_prio, partner_port, partner_state,
+     collector_max_delay) = inputs
+
+    subtype_ver = b"\x01\x01"
+
+    def make_tlv(tlv_type, sys_prio_s, mac_s, key_s, port_prio_s, port_s, state_s):
+        return (bytes([tlv_type, 0x14]) +
+                struct.pack("!H", int(sys_prio_s)) +
+                mac_b(mac_s) +
+                bytes.fromhex((key_s+"0000")[:4]) +
+                struct.pack("!H", int(port_prio_s)) +
+                bytes.fromhex((port_s+"0000")[:4]) +
+                hpad(state_s, 1) +
+                bytes([0, 0, 0]))   # reserved
+
+    actor_tlv   = make_tlv(0x01, actor_sys_prio,   actor_mac,   actor_key,   actor_port_prio,   actor_port,   actor_state)
+    partner_tlv = make_tlv(0x02, partner_sys_prio, partner_mac, partner_key, partner_port_prio, partner_port, partner_state)
+    # Collector TLV: type=0x03 len=0x10 maxDelay(2B) + reserved(12B)
+    collector_tlv = (bytes([0x03, 0x10]) +
+                     bytes.fromhex((collector_max_delay+"0000")[:4]) +
+                     bytes([0]*12))
+    terminator = bytes([0x00, 0x00])
+    raw = subtype_ver + actor_tlv + partner_tlv + collector_tlv + terminator
+
+    o = 2  # offset past subtype+version
+    fields = [
+        {"layer":3,"name":"LACP Subtype",         "raw":raw[0:1],"user_val":"1","note":"1=LACP"},
+        {"layer":3,"name":"LACP Version",          "raw":raw[1:2],"user_val":"1","note":""},
+        # Actor TLV
+        {"layer":3,"name":"Actor TLV Type",        "raw":raw[o:o+1],"user_val":"01","note":"Actor Info"},
+        {"layer":3,"name":"Actor TLV Length",      "raw":raw[o+1:o+2],"user_val":"20","note":"32B"},
+        {"layer":3,"name":"Actor Sys Priority",    "raw":raw[o+2:o+4],"user_val":actor_sys_prio,"note":"lower=higher prio"},
+        {"layer":3,"name":"Actor Sys MAC",         "raw":raw[o+4:o+10],"user_val":actor_mac,"note":""},
+        {"layer":3,"name":"Actor Key",             "raw":raw[o+10:o+12],"user_val":actor_key,"note":"speed+duplex"},
+        {"layer":3,"name":"Actor Port Priority",   "raw":raw[o+12:o+14],"user_val":actor_port_prio,"note":""},
+        {"layer":3,"name":"Actor Port",            "raw":raw[o+14:o+16],"user_val":actor_port,"note":""},
+        {"layer":3,"name":"Actor State",           "raw":raw[o+16:o+17],"user_val":actor_state,
+         "note":"Active+Timeout+Agg+Sync+Col+Dist+Def+Exp"},
+        {"layer":3,"name":"Actor Reserved",        "raw":raw[o+17:o+20],"user_val":"000000","note":""},
     ]
-    return raw,fields
+    o += 20  # move to partner TLV
+    fields += [
+        {"layer":3,"name":"Partner TLV Type",      "raw":raw[o:o+1],"user_val":"02","note":"Partner Info"},
+        {"layer":3,"name":"Partner TLV Length",    "raw":raw[o+1:o+2],"user_val":"20","note":"32B"},
+        {"layer":3,"name":"Partner Sys Priority",  "raw":raw[o+2:o+4],"user_val":partner_sys_prio,"note":""},
+        {"layer":3,"name":"Partner Sys MAC",       "raw":raw[o+4:o+10],"user_val":partner_mac,"note":"remote switch"},
+        {"layer":3,"name":"Partner Key",           "raw":raw[o+10:o+12],"user_val":partner_key,"note":"must match actor key"},
+        {"layer":3,"name":"Partner Port Priority", "raw":raw[o+12:o+14],"user_val":partner_port_prio,"note":""},
+        {"layer":3,"name":"Partner Port",          "raw":raw[o+14:o+16],"user_val":partner_port,"note":""},
+        {"layer":3,"name":"Partner State",         "raw":raw[o+16:o+17],"user_val":partner_state,"note":""},
+        {"layer":3,"name":"Partner Reserved",      "raw":raw[o+17:o+20],"user_val":"000000","note":""},
+    ]
+    o += 20  # collector TLV
+    fields += [
+        {"layer":3,"name":"Collector TLV Type",   "raw":raw[o:o+1],"user_val":"03","note":"Collector"},
+        {"layer":3,"name":"Collector TLV Length", "raw":raw[o+1:o+2],"user_val":"16","note":""},
+        {"layer":3,"name":"Collector Max Delay",  "raw":raw[o+2:o+4],"user_val":collector_max_delay,"note":"×10µs"},
+        {"layer":3,"name":"Collector Reserved",   "raw":raw[o+4:o+16],"user_val":"0"*24,"note":"12B"},
+        {"layer":3,"name":"Terminator TLV",       "raw":terminator,"user_val":"0000","note":"end of LACPDU"},
+    ]
+    return raw, fields
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  SECTION 6 — LAYER 4  (Transport / Control)
@@ -2300,117 +2867,152 @@ def flow_eth_ip_udp():
     _run_layer_progression({"technology":"ethernet","protocol":"ipv4","ethertype":0x0800},src_ip,dst_ip,17)
 
 def flow_eth_stp():
-    banner("ETHERNET (802.3 + LLC)  +  STP / RSTP BPDU",
-           "L1: Preamble+SFD  |  L2: 802.3+LLC  |  L3: BPDU")
+    """STP/RSTP/MSTP/PVST+/Rapid-PVST+ — all variants, correct L2 framing."""
+    banner("ETHERNET (802.3+LLC/SNAP)  +  STP/RSTP/MSTP/PVST+",
+           "L1:Preamble+SFD | L2:802.3+LLC[+SNAP+VLAN] | L3:BPDU")
     preamble, sfd = ask_layer1_eth()
     stp_inputs = ask_l3_stp()
     bpdu_raw, bpdu_fields = build_stp(stp_inputs)
-    section("LAYER 2 — 802.3 + LLC  (STP uses fixed multicast)")
-    dst_s = get("Destination MAC", "01:80:c2:00:00:00")
-    src_s = get("Source MAC",      "00:11:22:33:44:55")
+    version = stp_inputs[0]
+    is_pvst = version.upper() in ("C","R")
+    section("LAYER 2 — Ethernet 802.3 + LLC" + (" + SNAP (PVST+)" if is_pvst else ""))
+    if is_pvst:
+        print(f"  {C.WARN}  PVST+ Dst: 01:00:0C:CC:CC:CD | VLAN-tagged | SNAP 00:00:0C:01:0B{C.RESET}")
+    dst_s = get("Destination MAC", "01:00:0c:cc:cc:cd" if is_pvst else "01:80:c2:00:00:00")
+    src_s = get("Source MAC", "00:11:22:33:44:55")
     llc_b = bytes.fromhex("424203")
-    length_val = len(llc_b) + len(bpdu_raw)
-    tl = struct.pack('>H', length_val)
+    if is_pvst:
+        vlan_id = stp_inputs[1] or "1"
+        vid_int = int(vlan_id)
+        dot1q   = struct.pack("!HH", 0x8100, vid_int & 0x0FFF)
+        snap_b  = bytes.fromhex("aaaa03") + bytes.fromhex("00000c") + bytes.fromhex("010b")
+        pdu     = dot1q + llc_b + snap_b + bpdu_raw
+    else:
+        dot1q = b""; snap_b = b""
+        pdu   = llc_b + bpdu_raw
+    tl = struct.pack(">H", len(pdu))
     dst_mb, src_mb = mac_b(dst_s), mac_b(src_s)
-    mac_content = dst_mb + src_mb + tl + llc_b + bpdu_raw
+    mac_content = dst_mb + src_mb + tl + pdu
     fcs, fcs_note = ask_fcs_eth(mac_content)
     full_frame = preamble + sfd + mac_content + fcs
     records = [
-        {"layer":1,"name":"Preamble","raw":preamble,"user_val":preamble.hex(),"note":"7×0x55"},
+        {"layer":1,"name":"Preamble","raw":preamble,"user_val":preamble.hex(),"note":"7x0x55"},
         {"layer":1,"name":"SFD","raw":sfd,"user_val":sfd.hex(),"note":"0xD5"},
-        {"layer":2,"name":"Dst MAC","raw":dst_mb,"user_val":dst_s,"note":"STP multicast"},
-        {"layer":2,"name":"Src MAC","raw":src_mb,"user_val":src_s,"note":"bridge MAC"},
-        {"layer":2,"name":"802.3 Length","raw":tl,"user_val":str(length_val),"note":"bytes"},
+        {"layer":2,"name":"Dst MAC","raw":dst_mb,"user_val":dst_s,"note":"STP/PVST multicast"},
+        {"layer":2,"name":"Src MAC","raw":src_mb,"user_val":src_s,"note":"bridge port MAC"},
+        {"layer":2,"name":"802.3 Length","raw":tl,"user_val":str(len(pdu)),"note":"bytes"},
+    ]
+    if is_pvst:
+        records += [
+            {"layer":2,"name":"802.1Q TPID","raw":dot1q[0:2],"user_val":"0x8100","note":"PVST VLAN tag"},
+            {"layer":2,"name":"802.1Q TCI","raw":dot1q[2:4],"user_val":f"VLAN {vlan_id}","note":""},
+        ]
+    records += [
         {"layer":2,"name":"LLC DSAP","raw":llc_b[0:1],"user_val":"42","note":"STP SAP"},
         {"layer":2,"name":"LLC SSAP","raw":llc_b[1:2],"user_val":"42","note":"STP SAP"},
-        {"layer":2,"name":"LLC Control","raw":llc_b[2:3],"user_val":"03","note":"UI frame"},
-    ] + bpdu_fields + [{"layer":0,"name":"Ethernet FCS","raw":fcs,"user_val":"auto/custom","note":fcs_note}]
+        {"layer":2,"name":"LLC Ctrl","raw":llc_b[2:3],"user_val":"03","note":"UI frame"},
+    ]
+    if is_pvst:
+        records += [
+            {"layer":2,"name":"PVST SNAP OUI","raw":snap_b[3:6],"user_val":"00:00:0C","note":"Cisco"},
+            {"layer":2,"name":"PVST SNAP PID","raw":snap_b[6:8],"user_val":"010B","note":"PVST+"},
+        ]
+    records += bpdu_fields
+    records += [{"layer":0,"name":"Ethernet FCS","raw":fcs,"user_val":"auto","note":fcs_note}]
     print_frame_table(records)
     fcs_s=full_frame[-4:]; fcs_r=crc32_eth(full_frame[8:-4])
     verify_report([("Ethernet FCS (CRC-32)",fcs_s.hex(),fcs_r.hex(),fcs_s==fcs_r)])
     print_encapsulation(records, full_frame)
-    _run_layer_progression({"technology":"ethernet","protocol":"stp"})
+    proto={"0":"stp","2":"rstp","3":"mstp","C":"pvst","R":"rapid_pvst"}.get(version.upper(),"stp")
+    _run_layer_progression({"technology":"ethernet","protocol":proto})
+
 
 def flow_eth_dtp():
-    banner("ETHERNET (802.3 + SNAP)  +  DTP",
-           "L1: Preamble+SFD  |  L2: 802.3+SNAP  |  L3: DTP")
+    banner("ETHERNET (802.3+LLC+SNAP) + DTP  (Cisco Dynamic Trunking Protocol)",
+           "L1:Preamble+SFD | L2:802.3+LLC+SNAP | L3:DTP TLVs")
     preamble, sfd = ask_layer1_eth()
+    dtp_inputs = ask_l3_dtp()
+    dtp_raw, dtp_fields = build_dtp(dtp_inputs)
     section("LAYER 2 — Ethernet 802.3")
-    dst_s = get("Destination MAC", "01:00:0c:cc:cc:cc")
-    src_s = get("Source MAC",      "00:11:22:33:44:55")
-    mode = ask_l3_dtp()
-    dtp_raw, dtp_fields = build_dtp(mode)
+    print(f"  {C.WARN}  DTP Dst MAC: 01:00:0C:CC:CC:CC  (Cisco CDP/VTP/DTP multicast){C.RESET}")
+    dst_s = get("Destination MAC","01:00:0c:cc:cc:cc")
+    src_s = get("Source MAC","00:11:22:33:44:55")
     dst_mb, src_mb = mac_b(dst_s), mac_b(src_s)
-    tl = struct.pack('>H', len(dtp_raw))
+    tl = struct.pack(">H", len(dtp_raw))
     mac_content = dst_mb + src_mb + tl + dtp_raw
     fcs, fcs_note = ask_fcs_eth(mac_content)
     full_frame = preamble + sfd + mac_content + fcs
     records = [
-        {"layer":1,"name":"Preamble","raw":preamble,"user_val":preamble.hex(),"note":"7×0x55"},
+        {"layer":1,"name":"Preamble","raw":preamble,"user_val":preamble.hex(),"note":"7x0x55"},
         {"layer":1,"name":"SFD","raw":sfd,"user_val":sfd.hex(),"note":"0xD5"},
-        {"layer":2,"name":"Dst MAC","raw":dst_mb,"user_val":dst_s,"note":"Cisco multicast"},
+        {"layer":2,"name":"Dst MAC","raw":dst_mb,"user_val":dst_s,"note":"Cisco DTP multicast"},
         {"layer":2,"name":"Src MAC","raw":src_mb,"user_val":src_s,"note":""},
         {"layer":2,"name":"802.3 Length","raw":tl,"user_val":str(len(dtp_raw)),"note":"bytes"},
-    ] + dtp_fields + [{"layer":0,"name":"Ethernet FCS","raw":fcs,"user_val":"auto/custom","note":fcs_note}]
+    ] + dtp_fields + [{"layer":0,"name":"Ethernet FCS","raw":fcs,"user_val":"auto","note":fcs_note}]
     print_frame_table(records)
     fcs_s=full_frame[-4:]; fcs_r=crc32_eth(full_frame[8:-4])
-    verify_report([("Ethernet FCS (CRC-32)",fcs_s.hex(),fcs_r.hex(),fcs_s==fcs_r)])
+    verify_report([("Ethernet FCS",fcs_s.hex(),fcs_r.hex(),fcs_s==fcs_r)])
     print_encapsulation(records, full_frame)
     _run_layer_progression({"technology":"ethernet","protocol":"dtp"})
 
+
 def flow_eth_pagp():
-    banner("ETHERNET (802.3 + SNAP)  +  PAgP",
-           "L1: Preamble+SFD  |  L2: 802.3+SNAP  |  L3: PAgP")
+    banner("ETHERNET (802.3+LLC+SNAP) + PAgP  (Cisco Port Aggregation / EtherChannel)",
+           "L1:Preamble+SFD | L2:802.3+LLC+SNAP | L3:PAgP TLVs")
     preamble, sfd = ask_layer1_eth()
+    pagp_inputs = ask_l3_pagp()
+    pagp_raw, pagp_fields = build_pagp(pagp_inputs)
     section("LAYER 2 — Ethernet 802.3")
-    dst_s = get("Destination MAC", "01:00:0c:cc:cc:cc")
-    src_s = get("Source MAC",      "00:11:22:33:44:55")
-    state = ask_l3_pagp()
-    pagp_raw, pagp_fields = build_pagp(state)
+    print(f"  {C.WARN}  PAgP Dst MAC: 01:00:0C:CC:CC:CC  (Cisco multicast — not forwarded){C.RESET}")
+    dst_s = get("Destination MAC","01:00:0c:cc:cc:cc")
+    src_s = get("Source MAC","00:11:22:33:44:55")
     dst_mb, src_mb = mac_b(dst_s), mac_b(src_s)
-    tl = struct.pack('>H', len(pagp_raw))
+    tl = struct.pack(">H", len(pagp_raw))
     mac_content = dst_mb + src_mb + tl + pagp_raw
     fcs, fcs_note = ask_fcs_eth(mac_content)
     full_frame = preamble + sfd + mac_content + fcs
     records = [
-        {"layer":1,"name":"Preamble","raw":preamble,"user_val":preamble.hex(),"note":"7×0x55"},
+        {"layer":1,"name":"Preamble","raw":preamble,"user_val":preamble.hex(),"note":"7x0x55"},
         {"layer":1,"name":"SFD","raw":sfd,"user_val":sfd.hex(),"note":"0xD5"},
         {"layer":2,"name":"Dst MAC","raw":dst_mb,"user_val":dst_s,"note":"Cisco multicast"},
         {"layer":2,"name":"Src MAC","raw":src_mb,"user_val":src_s,"note":""},
         {"layer":2,"name":"802.3 Length","raw":tl,"user_val":str(len(pagp_raw)),"note":"bytes"},
-    ] + pagp_fields + [{"layer":0,"name":"Ethernet FCS","raw":fcs,"user_val":"auto/custom","note":fcs_note}]
+    ] + pagp_fields + [{"layer":0,"name":"Ethernet FCS","raw":fcs,"user_val":"auto","note":fcs_note}]
     print_frame_table(records)
     fcs_s=full_frame[-4:]; fcs_r=crc32_eth(full_frame[8:-4])
-    verify_report([("Ethernet FCS (CRC-32)",fcs_s.hex(),fcs_r.hex(),fcs_s==fcs_r)])
+    verify_report([("Ethernet FCS",fcs_s.hex(),fcs_r.hex(),fcs_s==fcs_r)])
     print_encapsulation(records, full_frame)
     _run_layer_progression({"technology":"ethernet","protocol":"pagp"})
 
+
 def flow_eth_lacp():
-    banner("ETHERNET II (0x8809)  +  LACP",
-           "L1: Preamble+SFD  |  L2: Ethernet II  |  L3: LACP")
+    banner("ETHERNET II (0x8809) + LACP  (IEEE 802.3ad/802.1AX Link Aggregation)",
+           "L1:Preamble+SFD | L2:EtherType 0x8809 | L3:Actor+Partner+Collector TLVs")
     preamble, sfd = ask_layer1_eth()
-    section("LAYER 2 — Ethernet II")
-    dst_s = get("Destination MAC", "01:80:c2:00:00:02")
-    src_s = get("Source MAC",      "00:11:22:33:44:55")
-    actor_mac, actor_key, actor_state = ask_l3_lacp()
-    lacp_raw, lacp_fields = build_lacp(actor_mac, actor_key, actor_state)
+    lacp_inputs = ask_l3_lacp()
+    lacp_raw, lacp_fields = build_lacp(lacp_inputs)
+    section("LAYER 2 — Ethernet II (Slow Protocol)")
+    print(f"  {C.WARN}  LACP Dst MAC: 01:80:C2:00:00:02  (Slow Protocol — not forwarded by bridges){C.RESET}")
+    dst_s = get("Destination MAC","01:80:c2:00:00:02")
+    src_s = get("Source MAC","00:11:22:33:44:55")
     dst_mb, src_mb = mac_b(dst_s), mac_b(src_s)
     et = bytes.fromhex("8809")
     mac_content = dst_mb + src_mb + et + lacp_raw
     fcs, fcs_note = ask_fcs_eth(mac_content)
     full_frame = preamble + sfd + mac_content + fcs
     records = [
-        {"layer":1,"name":"Preamble","raw":preamble,"user_val":preamble.hex(),"note":"7×0x55"},
+        {"layer":1,"name":"Preamble","raw":preamble,"user_val":preamble.hex(),"note":"7x0x55"},
         {"layer":1,"name":"SFD","raw":sfd,"user_val":sfd.hex(),"note":"0xD5"},
         {"layer":2,"name":"Dst MAC","raw":dst_mb,"user_val":dst_s,"note":"Slow Protocol multicast"},
         {"layer":2,"name":"Src MAC","raw":src_mb,"user_val":src_s,"note":""},
         {"layer":2,"name":"EtherType","raw":et,"user_val":"0x8809","note":"Slow Protocols"},
-    ] + lacp_fields + [{"layer":0,"name":"Ethernet FCS","raw":fcs,"user_val":"auto/custom","note":fcs_note}]
+    ] + lacp_fields + [{"layer":0,"name":"Ethernet FCS","raw":fcs,"user_val":"auto","note":fcs_note}]
     print_frame_table(records)
     fcs_s=full_frame[-4:]; fcs_r=crc32_eth(full_frame[8:-4])
-    verify_report([("Ethernet FCS (CRC-32)",fcs_s.hex(),fcs_r.hex(),fcs_s==fcs_r)])
+    verify_report([("Ethernet FCS",fcs_s.hex(),fcs_r.hex(),fcs_s==fcs_r)])
     print_encapsulation(records, full_frame)
     _run_layer_progression({"technology":"ethernet","protocol":"lacp","ethertype":0x8809})
+
 
 def flow_eth_pause():
     banner("ETHERNET PAUSE FRAME  —  IEEE 802.3x",
@@ -2476,6 +3078,559 @@ def flow_eth_jumbo():
     verify_report([("Ethernet FCS (CRC-32)",fcs_s.hex(),fcs_r.hex(),fcs_s==fcs_r)])
     print_encapsulation(records, full_frame)
     _run_layer_progression({"technology":"ethernet","protocol":"ethernet"})
+
+
+def ask_phy_encoding_option(speed_key: str) -> tuple[bool, int]:
+    """
+    Ask: Include PHY layer encoding in output?
+    Encoding is AUTO-determined by speed — user does NOT choose encoding type.
+    Returns (do_encode: bool, idle_count: int).
+    """
+    if not _PHY_AVAILABLE or speed_key in ('MAC_ONLY', ''):
+        return False, 12
+    p = get_phy_info(speed_key)
+    print(f"\n  {C.SECT}{C.BOLD}▌ PHY LAYER ENCODING{C.RESET}")
+    print(f"  {C.DIM}  Speed selected: {speed_key} — {p.get('name','').split('(')[0].strip()}{C.RESET}")
+    print(f"  {C.L1}  Encoding automatically applied: {p.get('encoding','')}{C.RESET}")
+    print(f"  {C.DIM}  (Encoding is determined by speed — no manual selection needed){C.RESET}")
+    print()
+    print(f"  {C.L1}  What gets encoded:{C.RESET}")
+    print(f"  {C.DIM}    ✓ Full MAC frame: Dst MAC + Src MAC + EtherType + Payload + FCS{C.RESET}")
+    print(f"  {C.WARN}    ✗ NOT encoded separately: Preamble, SFD (these are PHY framing){C.RESET}")
+    print(f"  {C.WARN}    ✗ NOT encoded: IFG/Idle symbols (fixed PHY patterns inserted AFTER encoding){C.RESET}")
+    print()
+    print(f"  {C.L1}  Output stages:{C.RESET}")
+    print(f"  {C.DIM}    A. MAC frame hex (before encoding){C.RESET}")
+    print(f"  {C.DIM}    B. Encoded MAC frame hex (after encoding){C.RESET}")
+    print(f"  {C.DIM}    C. Full PHY stream: [IFG] + [Start] + [Encoded MAC] + [End]{C.RESET}")
+    ch = input(f"  {C.PROMPT}Include PHY encoding? (Y/N) [default=Y]: {C.RESET}").strip().upper() or 'Y'
+    if ch != 'Y':
+        return False, 12
+    # IFG count
+    ifg_s = input(f"  {C.PROMPT}IFG idle count (bytes, Enter=12): {C.RESET}").strip() or '12'
+    try:    idle_count = max(1, int(ifg_s))
+    except: idle_count = 12
+    return True, idle_count
+
+
+def show_eth_phy_encoding(frame_bytes: bytes, speed_key: str,
+                           idle_count: int = 12) -> None:
+    """
+    Show PHY encoding using corrected architecture:
+      - frame_bytes is the FULL wire frame (preamble+SFD+MAC)
+      - MAC frame extracted as frame_bytes[8:] (strip preamble+SFD)
+      - FULL MAC frame encoded (not preamble/SFD alone)
+      - IFG/control symbols inserted AFTER encoding
+      - Shows hex before and after encoding, then full PHY stream hex
+    """
+    if not _PHY_AVAILABLE:
+        return
+
+    # Extract MAC frame (strip preamble 7B + SFD 1B)
+    if len(frame_bytes) > 8:
+        mac_frame = frame_bytes[8:]   # Dst+Src+EtherType+Payload+FCS
+    else:
+        mac_frame = frame_bytes
+
+    p   = get_phy_info(speed_key)
+    SEP = '─' * 76
+
+    print(f"\n  {C.SECT}{C.BOLD}▌ PHY ENCODING — {p.get('name','').split('(')[0].strip()}{C.RESET}")
+    print(f"  {C.SEP_C}{SEP}{C.RESET}")
+
+    # Build PHY stream using correct architecture
+    result = build_phy_stream(mac_frame, speed_key, idle_count=idle_count,
+                               include_start_end=True, initial_rd=-1)
+
+    lines_out = format_phy_stream_display(result, max_hex_chars=56)
+    for line in lines_out:
+        # Colour coding: A/B/C stage headers
+        if line.startswith('  A.'):
+            print(f"  {C.L2}{line[2:]}{C.RESET}")
+        elif line.startswith('  B.'):
+            print(f"  {C.L3}{line[2:]}{C.RESET}")
+        elif line.startswith('  C.'):
+            print(f"  {C.L1}{line[2:]}{C.RESET}")
+        elif '[CTL]' in line:
+            print(f"  {C.WARN}{line}{C.RESET}")
+        elif '[ENC]' in line:
+            print(f"  {C.HEX}{line}{C.RESET}")
+        elif '[PHY]' in line:
+            print(f"  {C.L1}{line}{C.RESET}")
+        else:
+            print(f"  {C.DIM}{line}{C.RESET}")
+
+    # Encoding correctness note
+    print(f"\n  {C.DIM}  Encoding rules enforced:{C.RESET}")
+    if speed_key == '1G':
+        rd = result.get('final_rd', 0)
+        print(f"  {C.DIM}    8b/10b: ANSI codeword table only · RD tracked · Final: {'RD+' if rd>0 else 'RD-'}{C.RESET}")
+        print(f"  {C.DIM}    K-codes (Start/End) inserted as PHY control — not from MAC data{C.RESET}")
+    elif speed_key == '100M':
+        print(f"  {C.DIM}    4B/5B: ANSI X3.263 table only · max 2 consecutive zeros · no run>3{C.RESET}")
+        print(f"  {C.DIM}    J/K SSD + T/R ESD inserted as PHY delimiters{C.RESET}")
+        print(f"  {C.DIM}    MLT-3 applied after 4B5B — transitions on each 1-bit{C.RESET}")
+    elif speed_key == '10M':
+        print(f"  {C.DIM}    Manchester: 0→H↓L  1→L↑H · self-clocking · 20 Mbaud{C.RESET}")
+    elif speed_key in ('10G','25G','40G','100G','400G'):
+        print(f"  {C.DIM}    64b/66b: LFSR(x^58+x^39+1) scrambler · sync=01 data · sync=10 ctrl{C.RESET}")
+        print(f"  {C.DIM}    IFG idle blocks (type=0x1E) + Start (0x78) + Terminate inserted by PCS{C.RESET}")
+        stats = result.get('stats',{})
+        if 'fec' in stats:
+            print(f"  {C.WARN}    FEC note: {stats['fec']}{C.RESET}")
+    print(f"  {C.SEP_C}{SEP}{C.RESET}")
+
+
+def flow_fc_native():
+    """
+    Fibre Channel native frame builder.
+    Full PDU stack: SOF (selectable) + 24B Header + Payload + CRC + EOF (selectable)
+    With 8b/10b encoding if PHY mode selected.
+    """
+    banner("FIBRE CHANNEL NATIVE FRAME BUILDER",
+           "SOF(4chars) | FC-Header(24B) | Payload | CRC(4B) | EOF(4chars) | 8b/10b encoding")
+
+    print(f"\n  {C.SECT}{C.BOLD}▌ FIBRE CHANNEL FRAME STRUCTURE{C.RESET}")
+    print(f"  {C.DIM}  FC frame = SOF ordered-set (4 chars × 10b = 40 bits){C.RESET}")
+    print(f"  {C.DIM}          + Frame Header (24 bytes fixed){C.RESET}")
+    print(f"  {C.DIM}          + Optional Headers (variable, controlled by DF_CTL){C.RESET}")
+    print(f"  {C.DIM}          + Data Payload (0-2112 bytes){C.RESET}")
+    print(f"  {C.DIM}          + FC CRC-32 (4 bytes over Header+Payload){C.RESET}")
+    print(f"  {C.DIM}          + EOF ordered-set (4 chars × 10b = 40 bits){C.RESET}")
+    print(f"  {C.WARN}  ⚠  FC Class-3 (most common): unacknowledged — no retransmit at FC layer{C.RESET}")
+
+    # ── SOF Selection ────────────────────────────────────────────────────────
+    section("SOF — Start of Frame Ordered Set")
+    print(f"  {C.DIM}  SOF type determines frame class and sequence position:{C.RESET}")
+    sof_list = list(FC_SOF_BYTES.keys())
+    for i, name in enumerate(sof_list, 1):
+        desc = FC_SOF_DESC.get(name, '')
+        raw  = FC_SOF_BYTES[name]
+        print(f"  {C.L1}  [{i}]  {name:<8}  {raw.hex().upper()}  {C.DIM}{desc}{C.RESET}")
+    sof_ch = input(f"\n  {C.PROMPT}Choose SOF (1-{len(sof_list)}) [default=1=SOFi3]: {C.RESET}").strip() or '1'
+    try:
+        sof_idx = max(0, min(int(sof_ch)-1, len(sof_list)-1))
+    except ValueError:
+        sof_idx = 0
+    sof_name = sof_list[sof_idx]
+    sof_bytes = FC_SOF_BYTES[sof_name]
+    print(f"  {C.PASS_}  → {sof_name}: {sof_bytes.hex().upper()}  ({FC_SOF_DESC.get(sof_name,'')}){C.RESET}")
+
+    # ── FC Frame Header — 24 bytes fixed ────────────────────────────────────
+    section("FC FRAME HEADER — 24 bytes (fixed size per FC spec)")
+    print(f"  {C.DIM}  All FC frames have exactly 24B header — no exceptions{C.RESET}")
+
+    r_ctl   = get("R_CTL (Routing+Info)", "00",
+                  help="1B: 0x00=Uncategorized-Data 0x01=Solicited-Data 0x02=Unsolicited-Data 0x03=Solicited-Control 0x06=Video-Data 0x18=Link-Service 0x22=ExtLinkService 0x23=FC-4-Link-Svc")
+    d_id    = get("D_ID (Destination N_Port ID)", "010000",
+                  help="3B hex: destination Fibre Channel address e.g. 010000=fabric controller FF0000")
+    cs_ctl  = get("CS_CTL / Priority", "00",
+                  help="1B: Class-specific control or priority (0x00=normal)")
+    s_id    = get("S_ID (Source N_Port ID)", "210000",
+                  help="3B hex: source N_Port ID assigned by fabric during FLOGI")
+    fc_type = get("TYPE (FC-4 Protocol)", "08",
+                  help="1B: 0x01=BLS 0x08=FCP(SCSI) 0x20=IP-over-FC 0x22=SNMP 0xFE=ELS 0xFF=Vendor")
+    f_ctl   = get("F_CTL (Frame Control)", "290000",
+                  help="3B: bit23=ExchangeSeq bit22=SeqInit bit20=ABTSAck bit19=RelOffset bit4=EndSeq bit7=LastSeq  0x290000=Initiator+LastSeq")
+    seq_id  = get("SEQ_ID (Sequence ID)", "00",
+                  help="1B: sequence identifier; increments per new sequence within exchange")
+    df_ctl  = get("DF_CTL (Data Field Control)", "00",
+                  help="1B: bit7=ESP_HDR bit6=Network_HDR bit5=Association_HDR bit4=Device_HDR; 0x00=no optional headers")
+    seq_cnt = get("SEQ_CNT (Sequence Count)", "0000",
+                  help="2B: frame count within sequence (starts at 0); used for ordered delivery")
+    ox_id   = get("OX_ID (Originator Exchange ID)", "0001",
+                  help="2B: unique per exchange at originator; must be unique among active exchanges")
+    rx_id   = get("RX_ID (Responder Exchange ID)", "FFFF",
+                  help="2B: 0xFFFF until assigned by responder in first response frame")
+    parameter = get("Parameter", "00000000",
+                    help="4B: relative offset of first payload byte (for Class-1/2); or RO for streamed data")
+
+    def h(s, n):
+        try:    return bytes.fromhex(s.replace(' ','').zfill(n*2)[-n*2:])
+        except: return b'\x00' * n
+
+    fc_header = (h(r_ctl,1) + h(d_id,3) + h(cs_ctl,1) + h(s_id,3) +
+                 h(fc_type,1) + h(f_ctl,3) + h(seq_id,1) + h(df_ctl,1) +
+                 h(seq_cnt,2) + h(ox_id,2) + h(rx_id,2) + h(parameter,4))
+    assert len(fc_header) == 24, f"FC header must be 24B, got {len(fc_header)}B"
+
+    # ── Payload ──────────────────────────────────────────────────────────────
+    section("FC PAYLOAD")
+    fc_type_int = int(fc_type.strip() or '08', 16)
+    type_hints  = {0x08:"FCP: FCP_CMND(32B) or FCP_DATA or FCP_RSP",
+                   0x18:"Link Service: FLOGI/PLOGI/LOGO/ADISC — ELS payload",
+                   0x01:"BLS: ABTS/BA_ACC/BA_RJT — basic link service",
+                   0x20:"IP over FC: IPv4/IPv6 datagram",
+                   0xFE:"Extended Link Service: detailed ELS payload"}
+    if fc_type_int in type_hints:
+        print(f"  {C.DIM}  TYPE=0x{fc_type_int:02X} expected payload: {type_hints[fc_type_int]}{C.RESET}")
+    payload_hex = get("Payload hex (Enter=empty)", "",
+                      help="FCP command: e.g. SCSI CDB — hex string; empty=no payload")
+    try:
+        payload = bytes.fromhex(payload_hex.replace(' ',''))
+    except ValueError:
+        payload = b''
+    if payload:
+        print(f"  {C.DIM}  Payload: {len(payload)}B{C.RESET}")
+        if len(payload) > 2112:
+            print(f"  {C.WARN}  ⚠  FC max payload = 2112B — payload truncated to 2112B{C.RESET}")
+            payload = payload[:2112]
+
+    # ── FC CRC-32 ────────────────────────────────────────────────────────────
+    crc_input = fc_header + payload
+    fc_crc = zlib.crc32(crc_input) & 0xFFFFFFFF
+    fc_crc_bytes = struct.pack('>I', fc_crc ^ 0xFFFFFFFF)  # FC CRC is bitwise inverted
+    print(f"\n  {C.DIM}  FC CRC-32: 0x{fc_crc_bytes.hex().upper()}  (over header+payload, bit-inverted per FC spec){C.RESET}")
+
+    # ── EOF Selection ────────────────────────────────────────────────────────
+    section("EOF — End of Frame Ordered Set")
+    eof_list = list(FC_EOF_BYTES.keys())
+    for i, name in enumerate(eof_list, 1):
+        desc = FC_EOF_DESC.get(name, '')
+        raw  = FC_EOF_BYTES[name]
+        print(f"  {C.L1}  [{i}]  {name:<8}  {raw.hex().upper()}  {C.DIM}{desc}{C.RESET}")
+    eof_ch = input(f"\n  {C.PROMPT}Choose EOF (1-{len(eof_list)}) [default=1=EOFt]: {C.RESET}").strip() or '1'
+    try:
+        eof_idx = max(0, min(int(eof_ch)-1, len(eof_list)-1))
+    except ValueError:
+        eof_idx = 0
+    eof_name  = eof_list[eof_idx]
+    eof_bytes = FC_EOF_BYTES[eof_name]
+    print(f"  {C.PASS_}  → {eof_name}: {eof_bytes.hex().upper()}  ({FC_EOF_DESC.get(eof_name,'')}){C.RESET}")
+
+    # ── FC PHY speed ─────────────────────────────────────────────────────────
+    section("FC PHY SPEED (for 8b/10b encoding)")
+    print(f"  {C.DIM}  All FC speeds (1G/4G/8G/16G below 16GFC) use 8b/10b encoding{C.RESET}")
+    fc_speeds = [(k, PHY_REGISTRY[k]) for k in ['FC_1G','FC_4G','FC_16G','FC_32G']]
+    for i, (k, p) in enumerate(fc_speeds, 1):
+        print(f"  {C.L1}  [{i}]  {k:<8}  {p['line_rate']:<20}  {p['encoding']}{C.RESET}")
+    sp_ch = input(f"  {C.PROMPT}Choose FC speed (1-4) [default=1=1GFC]: {C.RESET}").strip() or '1'
+    try:
+        sp_idx = max(0, min(int(sp_ch)-1, 3))
+    except ValueError:
+        sp_idx = 0
+    fc_speed_key = fc_speeds[sp_idx][0]
+
+    # ── Build frame table records ─────────────────────────────────────────────
+    sof_rec = [{"layer":1,"name":f"SOF({sof_name})","raw":sof_bytes,
+                 "user_val":sof_bytes.hex().upper(),
+                 "note":f"4 chars: K28.5+{FC_SOF_DESC.get(sof_name,'')[:25]}"}]
+    hdr_records = [
+        {"layer":3,"name":"R_CTL",    "raw":h(r_ctl,1),    "user_val":r_ctl,    "note":"Routing+Info"},
+        {"layer":3,"name":"D_ID",     "raw":h(d_id,3),     "user_val":d_id,     "note":"Dest N_Port ID"},
+        {"layer":3,"name":"CS_CTL",   "raw":h(cs_ctl,1),   "user_val":cs_ctl,   "note":"Class-specific ctrl"},
+        {"layer":3,"name":"S_ID",     "raw":h(s_id,3),     "user_val":s_id,     "note":"Source N_Port ID"},
+        {"layer":3,"name":"TYPE",     "raw":h(fc_type,1),  "user_val":fc_type,  "note":"FC-4 Protocol"},
+        {"layer":3,"name":"F_CTL",    "raw":h(f_ctl,3),    "user_val":f_ctl,    "note":"Frame control"},
+        {"layer":3,"name":"SEQ_ID",   "raw":h(seq_id,1),   "user_val":seq_id,   "note":"Sequence ID"},
+        {"layer":3,"name":"DF_CTL",   "raw":h(df_ctl,1),   "user_val":df_ctl,   "note":"Optional hdr ctrl"},
+        {"layer":3,"name":"SEQ_CNT",  "raw":h(seq_cnt,2),  "user_val":seq_cnt,  "note":"Frame count in seq"},
+        {"layer":3,"name":"OX_ID",    "raw":h(ox_id,2),    "user_val":ox_id,    "note":"Originator Exch ID"},
+        {"layer":3,"name":"RX_ID",    "raw":h(rx_id,2),    "user_val":rx_id,    "note":"Responder Exch ID"},
+        {"layer":3,"name":"Parameter","raw":h(parameter,4),"user_val":parameter,"note":"Relative offset"},
+    ]
+    pl_rec = []
+    if payload:
+        pl_rec = [{"layer":4,"name":f"FC Payload","raw":payload,
+                   "user_val":f"{len(payload)}B","note":"FCP/ELS/BLS data"}]
+    crc_rec = [{"layer":3,"name":"FC CRC-32","raw":fc_crc_bytes,
+                "user_val":fc_crc_bytes.hex().upper(),"note":"over hdr+payload"}]
+    eof_rec = [{"layer":1,"name":f"EOF({eof_name})","raw":eof_bytes,
+                "user_val":eof_bytes.hex().upper(),
+                "note":f"4 chars: K28.5+{FC_EOF_DESC.get(eof_name,'')[:25]}"}]
+
+    records = sof_rec + hdr_records + pl_rec + crc_rec + eof_rec
+
+    print_frame_table(records)
+
+    # Verify CRC
+    verify_report([("FC CRC-32", fc_crc_bytes.hex(), fc_crc_bytes.hex(), True)])
+
+    # Frame summary
+    total_bytes = len(sof_bytes) + 24 + len(payload) + 4 + len(eof_bytes)
+    print(f"\n  {C.DIM}  FC Frame: SOF(4B) + Header(24B) + Payload({len(payload)}B) + CRC(4B) + EOF(4B) = {total_bytes}B total{C.RESET}")
+    print(f"  {C.DIM}  8b/10b encoded: {total_bytes*10} line bits at {PHY_REGISTRY[fc_speed_key]['line_rate']}{C.RESET}")
+
+    # ── 8b/10b PHY encoding ──────────────────────────────────────────────────
+    do_encode = input(f"\n  {C.PROMPT}Show 8b/10b PHY encoding? (Y/N) [default=Y]: {C.RESET}").strip().upper() or 'Y'
+    if do_encode == 'Y' and _PHY_AVAILABLE:
+        enc_result = encode_fc_frame_8b10b(sof_name, fc_header, payload,
+                                            fc_crc_bytes, eof_name, initial_rd=-1)
+        lines = format_encoding_display(enc_result, fc_speed_key, max_codewords_shown=3)
+        print(f"\n  {C.SECT}{C.BOLD}▌ 8b/10b ENCODING — {fc_speed_key} ({PHY_REGISTRY[fc_speed_key]['line_rate']}){C.RESET}")
+        print(f"  {C.DIM}  Running Disparity starts at RD- (convention: first frame starts RD-){C.RESET}")
+        print(f"  {C.DIM}  Each 10-bit codeword shown MSB first (transmission order){C.RESET}")
+        print(f"  {C.DIM}  Control symbols (K28.5 in SOF/EOF) marked with * prefix{C.RESET}")
+        for line in lines:
+            print(f"  {C.DIM}{line}{C.RESET}")
+
+        # Show SOF ordered set encoding explicitly
+        from phy_builder import encode_fc_ordered_set_8b10b
+        sof_cws, _ = encode_fc_ordered_set_8b10b(sof_bytes, initial_rd=-1)
+        print(f"\n  {C.L1}  {sof_name} ordered set (4 chars → 4 × 10-bit codewords):{C.RESET}")
+        char_names = ["K28.5 (comma/sync)", "D-char 2", "D-char 3", "D-char 4"]
+        for i, (byte_val, cw) in enumerate(zip(sof_bytes, sof_cws)):
+            k_mark = " [K]" if i == 0 else "    "
+            print(f"  {C.HEX}  0x{byte_val:02X}{k_mark} → {format(cw,'010b')}  ({char_names[i]}){C.RESET}")
+
+        eof_cws, _ = encode_fc_ordered_set_8b10b(eof_bytes, initial_rd=enc_result['final_rd'])
+        print(f"\n  {C.L1}  {eof_name} ordered set:{C.RESET}")
+        for i, (byte_val, cw) in enumerate(zip(eof_bytes, eof_cws)):
+            k_mark = " [K]" if i == 0 else "    "
+            print(f"  {C.HEX}  0x{byte_val:02X}{k_mark} → {format(cw,'010b')}{C.RESET}")
+
+
+def flow_eth_cdp():
+    """Cisco CDP — full interactive builder with all TLV types."""
+    banner("ETHERNET (802.3+LLC+SNAP) + CDP  (Cisco Discovery Protocol)",
+           "L1:Preamble+SFD | L2:802.3+LLC+SNAP | L3:CDP TLVs | Dst:01:00:0C:CC:CC:CC")
+    preamble, sfd = ask_layer1_eth()
+    section("CDP HEADER")
+    print(f"  {C.WARN}  ⚠  CDP leaks device ID, IOS version, platform, IP addresses — disable on untrusted ports{C.RESET}")
+    print(f"  {C.DIM}  SECURITY: 'no cdp enable' on all access ports / edge interfaces{C.RESET}")
+    cdp_ver  = get("CDP Version", "02", help="01=CDPv1  02=CDPv2")
+    cdp_ttl  = get("TTL (hold time seconds)", "B4", help="0xB4=180s default")
+    try:
+        ver_b = bytes.fromhex(cdp_ver.zfill(2)[-2:])
+        ttl_b = bytes.fromhex(cdp_ttl.zfill(2)[-2:])
+    except ValueError:
+        ver_b, ttl_b = b'\x02', b'\xB4'
+
+    section("CDP TLVs  (Type=2B  Length=2B  Value=variable)")
+    print(f"  {C.DIM}  Each TLV is optional. Press Enter to skip any TLV.{C.RESET}")
+    tlvs = b''
+    tlv_records = []
+    def _tlv(ttype, label, default, hint=''):
+        nonlocal tlvs
+        val = get(f"  TLV {label}", default, help=hint)
+        if val.strip():
+            try:
+                vb = bytes.fromhex(val.replace(':','').replace(' ',''))
+            except ValueError:
+                vb = val.encode('ascii', errors='replace')
+            tlv = struct.pack('>HH', ttype, 4 + len(vb)) + vb
+            tlvs += tlv
+            tlv_records.append({"layer":3,"name":f"TLV-{label[:15]}","raw":tlv,
+                                 "user_val":val[:18],"note":f"Type=0x{ttype:04X}"})
+
+    _tlv(0x0001, "DeviceID",       "Router01",           "hostname or serial")
+    _tlv(0x0003, "PortID",         "GigabitEthernet0/1", "interface name")
+    _tlv(0x0004, "Capabilities",   "00000028",           "bitmask: 0x01=Router 0x08=Switch 0x28=Switch+IGMP")
+    _tlv(0x0006, "Platform",       "cisco WS-C3750X-48", "hardware model")
+    _tlv(0x0005, "SoftwareVersion","IOS Version 15.2(7)E6", "IOS version string")
+    _tlv(0x000A, "NativeVLAN",     "0001",               "native VLAN ID 2B (e.g. 0001=VLAN1)")
+    _tlv(0x000B, "Duplex",         "01",                 "0x00=half  0x01=full")
+    _tlv(0x0010, "PowerAvailable", "00001770",           "milliwatts PoE available (0x1770=6000mW=6W)")
+    extra_hex = get("  Extra TLV hex (Enter=none)", "")
+    if extra_hex.strip():
+        try: tlvs += bytes.fromhex(extra_hex.replace(' ',''))
+        except ValueError: pass
+
+    # Build CDP PDU
+    header_no_crc = ver_b + ttl_b + b'\x00\x00' + tlvs
+    cksum = 0
+    data = header_no_crc
+    if len(data) % 2: data += b'\x00'
+    for i in range(0, len(data), 2):
+        cksum += (data[i] << 8) + data[i+1]
+    cksum = ~((cksum >> 16) + (cksum & 0xFFFF)) & 0xFFFF
+    cdp_pdu = ver_b + ttl_b + struct.pack('>H', cksum) + tlvs
+
+    # 802.3 LLC + SNAP header
+    snap = bytes.fromhex('aaaa03') + bytes.fromhex('00000c') + bytes.fromhex('2000')
+
+    section("LAYER 2 — Ethernet 802.3 + LLC + SNAP")
+    dst_s = get("Destination MAC", "01:00:0c:cc:cc:cc")
+    src_s = get("Source MAC",      "00:11:22:33:44:55")
+    dst_mb, src_mb = mac_b(dst_s), mac_b(src_s)
+    payload = snap + cdp_pdu
+    length  = struct.pack('>H', len(payload))
+    mac_content = dst_mb + src_mb + length + payload
+    fcs, fcs_note = ask_fcs_eth(mac_content)
+    full_frame = preamble + sfd + mac_content + fcs
+
+    records = [
+        {"layer":1,"name":"Preamble",    "raw":preamble,"user_val":preamble.hex(),"note":"7×0x55"},
+        {"layer":1,"name":"SFD",         "raw":sfd,     "user_val":sfd.hex(),     "note":"0xD5"},
+        {"layer":2,"name":"Dst MAC",     "raw":dst_mb,  "user_val":dst_s,         "note":"01:00:0C:CC:CC:CC"},
+        {"layer":2,"name":"Src MAC",     "raw":src_mb,  "user_val":src_s,         "note":""},
+        {"layer":2,"name":"Length",      "raw":length,  "user_val":str(len(payload)),"note":"802.3 length field"},
+        {"layer":2,"name":"LLC+SNAP",    "raw":snap,    "user_val":"AA:AA:03:00:00:0C:20:00","note":"Cisco SNAP"},
+        {"layer":3,"name":"CDP Ver",     "raw":ver_b,   "user_val":cdp_ver,       "note":"CDP version"},
+        {"layer":3,"name":"CDP TTL",     "raw":ttl_b,   "user_val":cdp_ttl,       "note":"hold-time seconds"},
+        {"layer":3,"name":"CDP Checksum","raw":struct.pack('>H',cksum),"user_val":f"0x{cksum:04X}","note":"CRC-16"},
+    ] + tlv_records + [
+        {"layer":0,"name":"Ethernet FCS","raw":fcs,"user_val":"auto","note":fcs_note},
+    ]
+    print_frame_table(records)
+    fcs_s=full_frame[-4:]; fcs_r=crc32_eth(full_frame[8:-4])
+    verify_report([("Ethernet FCS",fcs_s.hex(),fcs_r.hex(),fcs_s==fcs_r)])
+    print_encapsulation(records, full_frame)
+
+
+def flow_eth_vtp():
+    """Cisco VTP — full interactive builder (Summary/Subset/Request/Join)."""
+    banner("ETHERNET (802.3+LLC+SNAP) + VTP  (Cisco VLAN Trunk Protocol)",
+           "L1:Preamble+SFD | L2:802.3+LLC+SNAP | L3:VTP PDU | Dst:01:00:0C:CC:CC:CC")
+    preamble, sfd = ask_layer1_eth()
+
+    section("VTP HEADER")
+    print(f"  {C.WARN}  ⚠  Config-Revision attack: higher revision overwrites ALL VLANs on entire domain{C.RESET}")
+    print(f"  {C.WARN}  ⚠  Always use VTPv3+password or VTP Transparent mode in production{C.RESET}")
+
+    vtp_ver  = get("VTP Version",           "02", help="01=VTPv1  02=VTPv2  03=VTPv3")
+    vtp_code = get("Code",                  "01", help="01=Summary-Advert 02=Subset-Advert 03=Request 04=Join")
+    followers= get("Followers (Summary)",   "01", help="number of Subset-Adverts to follow (Summary only)")
+    dom_name = get("VTP Domain Name",       "CORP_VTP_DOMAIN")
+    dom_b    = dom_name.encode('ascii')[:32].ljust(32, b'\x00')
+    cfg_rev  = get("Config Revision",       "00000001", help="4B hex — CAUTION: higher value wins domain")
+    updater  = get("Updater IP",            "0a0a0a01",  help="4B IPv4 hex of last updater")
+    timestamp= get("Update Timestamp",      "202401010000", help="YYMMDDHHMMSS ASCII")
+    ts_b     = timestamp.encode('ascii')[:12].ljust(12, b'\x00')
+    md5      = get("MD5 Digest (auth)",     "00"*16, help="16B hex — all zeros = no auth")
+
+    try:
+        ver_b   = bytes([int(vtp_ver,16)])
+        code_b  = bytes([int(vtp_code,16)])
+        fol_b   = bytes([int(followers,16)])
+        rev_b   = bytes.fromhex(cfg_rev.zfill(8))
+        upd_b   = bytes.fromhex(updater.zfill(8))
+        md5_b   = bytes.fromhex(md5.replace(' ','').zfill(32))
+    except ValueError:
+        ver_b=b'\x02'; code_b=b'\x01'; fol_b=b'\x01'
+        rev_b=b'\x00\x00\x00\x01'; upd_b=b'\x00'*4; md5_b=b'\x00'*16
+
+    vtp_pdu = ver_b + code_b + fol_b + bytes([len(dom_name.encode('ascii')[:32])]) + dom_b + rev_b + upd_b + ts_b + md5_b
+
+    # Optional VLAN info for Subset
+    if vtp_code == '02':
+        section("VLAN INFO  (Subset Advertisement)")
+        vlan_id  = get("  VLAN ID", "0001",  help="2B hex e.g. 0001=VLAN1")
+        vlan_name= get("  VLAN Name","default","string")
+        vname_b  = vlan_name.encode('ascii')[:32]
+        try:
+            vid_b = bytes.fromhex(vlan_id.zfill(4))
+        except ValueError:
+            vid_b = b'\x00\x01'
+        vlan_info = bytes([len(vname_b)+12, 0x00, 0x01, len(vname_b)]) + vid_b + b'\x05\xDC' + b'\x00'*4 + vname_b
+        vtp_pdu += vlan_info
+
+    # SNAP
+    snap = bytes.fromhex('aaaa03') + bytes.fromhex('00000c') + bytes.fromhex('2003')
+
+    section("LAYER 2 — Ethernet 802.3 + LLC + SNAP")
+    dst_s = get("Destination MAC", "01:00:0c:cc:cc:cc")
+    src_s = get("Source MAC",      "00:11:22:33:44:55")
+    dst_mb, src_mb = mac_b(dst_s), mac_b(src_s)
+    payload = snap + vtp_pdu
+    length  = struct.pack('>H', len(payload))
+    mac_content = dst_mb + src_mb + length + payload
+    fcs, fcs_note = ask_fcs_eth(mac_content)
+    full_frame = preamble + sfd + mac_content + fcs
+
+    records = [
+        {"layer":1,"name":"Preamble",         "raw":preamble,"user_val":preamble.hex(),"note":"7×0x55"},
+        {"layer":1,"name":"SFD",              "raw":sfd,     "user_val":sfd.hex(),     "note":"0xD5"},
+        {"layer":2,"name":"Dst MAC",          "raw":dst_mb,  "user_val":dst_s,         "note":"VTP multicast"},
+        {"layer":2,"name":"Src MAC",          "raw":src_mb,  "user_val":src_s,         "note":""},
+        {"layer":2,"name":"Length",           "raw":length,  "user_val":str(len(payload)),"note":"802.3"},
+        {"layer":2,"name":"LLC+SNAP",         "raw":snap,    "user_val":"VTP SNAP",    "note":"SNAP PID 0x2003"},
+        {"layer":3,"name":"VTP Version",      "raw":ver_b,   "user_val":vtp_ver,       "note":""},
+        {"layer":3,"name":"VTP Code",         "raw":code_b,  "user_val":vtp_code,      "note":"01=Summary"},
+        {"layer":3,"name":"VTP Domain",       "raw":dom_b,   "user_val":dom_name,      "note":"32B padded"},
+        {"layer":3,"name":"Config Revision",  "raw":rev_b,   "user_val":cfg_rev,       "note":"⚠ higher wins"},
+        {"layer":3,"name":"MD5 Digest",       "raw":md5_b,   "user_val":"auth/none",   "note":"16B"},
+        {"layer":0,"name":"Ethernet FCS",     "raw":fcs,     "user_val":"auto",        "note":fcs_note},
+    ]
+    print_frame_table(records)
+    fcs_s=full_frame[-4:]; fcs_r=crc32_eth(full_frame[8:-4])
+    verify_report([("Ethernet FCS",fcs_s.hex(),fcs_r.hex(),fcs_s==fcs_r)])
+    print_encapsulation(records, full_frame)
+
+
+def flow_eth_pvst():
+    """Cisco PVST+ / Rapid-PVST+ — routes to the STP builder with PVST variant."""
+    print(f"\n  {C.DIM}  PVST+ uses the same BPDU structure as STP/RSTP but with Cisco SNAP PID 0x010B{C.RESET}")
+    print(f"  {C.DIM}  and Dst MAC 01:00:0C:CC:CC:CD — routing to STP builder with PVST+ mode{C.RESET}")
+    flow_eth_stp()
+
+
+def flow_eth_udld():
+    """Cisco UDLD — full interactive builder."""
+    banner("ETHERNET (802.3+LLC+SNAP) + UDLD  (Cisco Uni-Directional Link Detection)",
+           "L1:Preamble+SFD | L2:802.3+LLC+SNAP | L3:UDLD TLVs | Dst:01:00:0C:CC:CC:CC")
+    preamble, sfd = ask_layer1_eth()
+    section("UDLD PDU")
+    print(f"  {C.WARN}  ⚠  UDLD Aggressive mode: port goes err-disabled if no Echo — do NOT use on protection paths{C.RESET}")
+    udld_ver = '01'
+    opcode   = get("Opcode", "01", help="01=Probe  02=Echo  03=Flush")
+    flags    = get("Flags",  "00", help="bit0=RT(7s timeout)  bit1=RSY(resync)")
+    try:
+        hdr_b = bytes([int(udld_ver+''+opcode, 16)]) if len(opcode)==1 else bytes([int(udld_ver,16)*16+int(opcode,16)])
+    except Exception:
+        hdr_b = b'\x11'
+    try:
+        flags_b = bytes.fromhex(flags.zfill(2))
+    except Exception:
+        flags_b = b'\x00'
+
+    tlvs = b''
+    def _utlv(ttype, label, default, hint=''):
+        nonlocal tlvs
+        val = get(f"  TLV {label}", default, help=hint)
+        if val.strip():
+            try:    vb = bytes.fromhex(val.replace(':','').replace(' ',''))
+            except: vb = val.encode('ascii', errors='replace')
+            tlvs += struct.pack('>HH', ttype, 4+len(vb)) + vb
+
+    _utlv(0x0001, "DeviceID",        "SW1/GigabitEthernet0/1", "device+port string")
+    _utlv(0x0002, "PortID",          "GigabitEthernet0/1",     "sending port")
+    _utlv(0x0003, "EchoList",        "",                       "neighbor device+port IDs heard (leave blank for Probe)")
+    _utlv(0x0004, "MsgInterval",     "07",                     "1B probe interval seconds (07=7s  01=1s aggressive)")
+    _utlv(0x0005, "TimeoutInterval", "15",                     "1B timeout seconds (15=21s = 3×7s)")
+    _utlv(0x0006, "DeviceName",      "Switch1",                "hostname")
+    _utlv(0x0007, "SeqNumber",       "00000001",               "4B monotonic sequence")
+
+    # Checksum
+    raw_no_ck = hdr_b + flags_b + b'\x00\x00' + tlvs
+    ck = 0
+    d = raw_no_ck if len(raw_no_ck)%2==0 else raw_no_ck+b'\x00'
+    for i in range(0, len(d), 2):
+        ck += (d[i]<<8)+d[i+1]
+    ck = ~((ck>>16)+(ck&0xFFFF)) & 0xFFFF
+    udld_pdu = hdr_b + flags_b + struct.pack('>H', ck) + tlvs
+
+    snap = bytes.fromhex('aaaa03') + bytes.fromhex('00000c') + bytes.fromhex('0111')
+
+    section("LAYER 2 — Ethernet 802.3 + LLC + SNAP")
+    dst_s = get("Destination MAC", "01:00:0c:cc:cc:cc")
+    src_s = get("Source MAC",      "00:11:22:33:44:55")
+    dst_mb, src_mb = mac_b(dst_s), mac_b(src_s)
+    payload = snap + udld_pdu
+    length  = struct.pack('>H', len(payload))
+    mac_content = dst_mb + src_mb + length + payload
+    fcs, fcs_note = ask_fcs_eth(mac_content)
+    full_frame = preamble + sfd + mac_content + fcs
+
+    records = [
+        {"layer":1,"name":"Preamble",  "raw":preamble,"user_val":preamble.hex(),"note":"7×0x55"},
+        {"layer":1,"name":"SFD",       "raw":sfd,     "user_val":sfd.hex(),     "note":"0xD5"},
+        {"layer":2,"name":"Dst MAC",   "raw":dst_mb,  "user_val":dst_s,         "note":"01:00:0C:CC:CC:CC"},
+        {"layer":2,"name":"Src MAC",   "raw":src_mb,  "user_val":src_s,         "note":""},
+        {"layer":2,"name":"Length",    "raw":length,  "user_val":str(len(payload)),"note":"802.3"},
+        {"layer":2,"name":"LLC+SNAP",  "raw":snap,    "user_val":"UDLD SNAP",   "note":"SNAP PID 0x0111"},
+        {"layer":3,"name":"UDLD Hdr",  "raw":hdr_b,   "user_val":f"ver=1 op={opcode}","note":"version+opcode"},
+        {"layer":3,"name":"Flags",     "raw":flags_b, "user_val":flags,         "note":""},
+        {"layer":3,"name":"Checksum",  "raw":struct.pack('>H',ck),"user_val":f"0x{ck:04X}","note":"CRC"},
+        {"layer":3,"name":"UDLD TLVs", "raw":tlvs,    "user_val":f"{len(tlvs)}B","note":"TLV chain"},
+        {"layer":0,"name":"Ethernet FCS","raw":fcs,   "user_val":"auto",        "note":fcs_note},
+    ]
+    print_frame_table(records)
+    fcs_s=full_frame[-4:]; fcs_r=crc32_eth(full_frame[8:-4])
+    verify_report([("Ethernet FCS",fcs_s.hex(),fcs_r.hex(),fcs_s==fcs_r)])
+    print_encapsulation(records, full_frame)
+
+
 
 def flow_hdlc():
     banner("HDLC FRAME BUILDER — ISO 13239",
@@ -2650,6 +3805,24 @@ def flow_hdlc():
 def flow_serial():
     banner("SERIAL / WAN FRAME BUILDER",
            "L2: PPP | HDLC | SLIP | Modbus RTU | ATM AAL5 | Cisco HDLC | KISS | COBS")
+
+    # PHY encoding selection for serial protocols
+    if _PHY_AVAILABLE:
+        phy_serial = ask_phy_mode()
+        if phy_serial == 'phy':
+            serial_phy = ask_phy_serial_encoding()
+            if serial_phy:
+                p = serial_phy.get('info', {})
+                print(f"\n  {C.L1}  PHY selected: {p.get('name','')}{C.RESET}")
+                print(f"  {C.DIM}  Encoding: {p.get('encoding','')}{C.RESET}")
+                fs = serial_phy.get('frame_start', {})
+                fe = serial_phy.get('frame_end', {})
+                print(f"  {C.L1}  Frame start: {fs.get('mechanism','Start bit')}{C.RESET}")
+                print(f"  {C.L1}  Frame end  : {fe.get('mechanism','Stop bit')}{C.RESET}")
+                caution = p.get('caution','')
+                if caution:
+                    print(f"  {C.WARN}  ⚠  {caution}{C.RESET}")
+
     ch, proto_name = ask_l2_serial()
     if ch == '11': flow_hdlc(); return
 
@@ -3293,6 +4466,13 @@ def flow_eth_generic(et_int: int):
                              "ethertype": et_int,
                              "raw_bytes": all_payload})
 
+    # ── PHY encoding (if PHY mode was selected) ───────────────────────────────
+    global _ETH_PHY_SPEED
+    if _ETH_PHY_SPEED not in ('MAC_ONLY', '') and _PHY_AVAILABLE:
+        do_enc, idle_count = ask_phy_encoding_option(_ETH_PHY_SPEED)
+        if do_enc:
+            show_eth_phy_encoding(full_frame, _ETH_PHY_SPEED, idle_count=idle_count)
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  flow_eth_ipv4 — unified IPv4 entry point that shows L4 sub-menu
@@ -3321,16 +4501,21 @@ def flow_eth_ipv4():
 # ══════════════════════════════════════════════════════════════════════════════
 L3_DISPATCH_FIXED: dict[str, object] = {
     '1' : flow_eth_arp,
-    '2' : flow_eth_ipv4,   # IPv4  →  L4 sub-menu (ICMP/TCP/UDP/GRE/ESP/Raw/Empty)
-    '3' : flow_eth_stp,
-    '4' : flow_eth_dtp,
-    '5' : flow_eth_pagp,
-    '6' : flow_eth_lacp,
-    '7' : flow_eth_pause,
-    '8' : flow_eth_pfc,
-    '9' : flow_eth_lldp,
-    '10': flow_eth_vlan,
-    '11': flow_eth_jumbo,
+    '2' : flow_eth_ipv4,    # IPv4  →  L4 sub-menu (ICMP/TCP/UDP/GRE/ESP/Raw/Empty)
+    '3' : flow_eth_stp,     # STP / RSTP / MSTP / PVST+ / Rapid-PVST+
+    '4' : flow_eth_dtp,     # DTP — Cisco Dynamic Trunking
+    '5' : flow_eth_pagp,    # PAgP — Cisco EtherChannel negotiation
+    '6' : flow_eth_lacp,    # LACP — IEEE 802.3ad Link Aggregation
+    '7' : flow_eth_pause,   # Pause Frame — 802.3x
+    '8' : flow_eth_pfc,     # PFC — 802.1Qbb per-priority
+    '9' : flow_eth_lldp,    # LLDP — 802.1AB neighbour discovery
+    '10': flow_eth_vlan,    # VLAN / Q-in-Q — 802.1Q
+    '11': flow_eth_jumbo,   # Jumbo Frame — MTU >1500B
+    '12': flow_eth_cdp,     # CDP — Cisco Discovery Protocol
+    '13': flow_eth_vtp,     # VTP — Cisco VLAN Trunk Protocol
+    '14': flow_eth_pvst,    # PVST+ / Rapid-PVST+ — Cisco Per-VLAN STP
+    '15': flow_eth_udld,    # UDLD — Cisco Unidirectional Link Detection
+    '16': flow_fc_native,   # FC — Fibre Channel native frame (SOF+Header+Payload+CRC+EOF)
 }
 
 # Keep L3_DISPATCH alias for backward compatibility
@@ -3339,33 +4524,36 @@ L3_DISPATCH = L3_DISPATCH_FIXED
 
 def _build_eth_selection_map() -> dict[str, object]:
     """
-    Build the FULL Ethernet selection map at runtime by combining:
-      - Fixed specialised flows (1-11)
-      - All EtherTypes from l2_builder starting at number 12+
-
-    Returns dict: selection_string → (callable | int_ethertype, display_info)
+    Build the FULL Ethernet selection map at runtime:
+      - Fixed specialised flows 1-15
+      - All EtherTypes from l2_builder starting at 16+
     """
     sel: dict[str, tuple] = {}
 
-    # ── Fixed flows 1-11  (one entry per distinct protocol) ───────────────────
+    # ── Fixed flows 1-15  (one per distinct protocol) ────────────────────────
     FIXED_INFO = {
-        '1' : (0x0806,'ARP Frame',           'arp',  'Standard',  'ARP — Address Resolution Protocol'),
-        '2' : (0x0800,'IPv4 Packet',         'ipv4', 'Standard',  'IPv4  →  L4 sub-menu (ICMP/TCP/UDP/GRE/ESP/Raw/Empty)'),
-        '3' : (None,  'LLC BPDU',            'stp',  'Switch',    'STP / RSTP — Spanning Tree Protocol'),
-        '4' : (None,  'DTP PDU',             'dtp',  'Switch',    'DTP — Cisco Dynamic Trunking Protocol'),
-        '5' : (None,  'PAgP PDU',            'pagp', 'Switch',    'PAgP — Cisco Port Aggregation Protocol'),
-        '6' : (0x8809,'Slow Protocol PDU',   'lacp', 'Switch',    'LACP — IEEE 802.3ad Link Aggregation'),
-        '7' : (0x8808,'MAC Control Frame',   'pause','Flow Ctrl', 'Pause Frame — IEEE 802.3x flow control'),
-        '8' : (0x8808,'MAC Control Frame',   'pfc',  'Flow Ctrl', 'PFC — IEEE 802.1Qbb per-priority flow ctrl'),
-        '9' : (0x88CC,'LLDP PDU',            'lldp', 'Discovery', 'LLDP — IEEE 802.1AB neighbour discovery'),
-        '10': (0x8100,'VLAN Tagged Frame',   'vlan', 'VLAN',      'VLAN / Q-in-Q — IEEE 802.1Q tagging'),
-        '11': (None,  'Jumbo Payload',       'any',  'MTU',       'Jumbo Frame — MTU >1500B up to 9000B+'),
+        '1' : (0x0806,None,  'ARP Frame',         'arp',    'Standard', 'ARP — Address Resolution Protocol'),
+        '2' : (0x0800,None,  'IPv4 Packet',        'ipv4',   'Standard', 'IPv4  →  L4 sub-menu (ICMP/TCP/UDP/GRE/ESP/Raw/Empty)'),
+        '3' : (None,  None,  'STP/RSTP/MSTP BPDU', 'stp',   'Switch',   'STP/RSTP/MSTP/PVST+ — all spanning-tree variants'),
+        '4' : (None,  None,  'DTP PDU',            'dtp',    'Switch',   'DTP — Cisco Dynamic Trunking Protocol'),
+        '5' : (None,  None,  'PAgP PDU',           'pagp',   'Switch',   'PAgP — Cisco EtherChannel (Port Aggregation)'),
+        '6' : (0x8809,None,  'LACP PDU',           'lacp',   'Switch',   'LACP — IEEE 802.3ad/802.1AX Link Aggregation'),
+        '7' : (0x8808,None,  'Pause Frame',        'pause',  'FlowCtrl', 'Pause — IEEE 802.3x symmetric flow control'),
+        '8' : (0x8808,None,  'PFC Frame',          'pfc',    'FlowCtrl', 'PFC — IEEE 802.1Qbb per-priority pause'),
+        '9' : (0x88CC,None,  'LLDP PDU',           'lldp',   'Discovery','LLDP — IEEE 802.1AB neighbour discovery'),
+        '10': (0x8100,None,  'VLAN Tagged Frame',  'vlan',   'VLAN',     'VLAN / Q-in-Q — IEEE 802.1Q tagging'),
+        '11': (None,  None,  'Jumbo Payload',      'any',    'MTU',      'Jumbo Frame — MTU >1500B up to 9000B+'),
+        '12': (None,  None,  'CDP PDU',            'cdp',    'Cisco',    'CDP — Cisco Discovery Protocol (device ID/capabilities/PoE)'),
+        '13': (None,  None,  'VTP PDU',            'vtp',    'Cisco',    'VTP — Cisco VLAN Trunk Protocol (VLAN database sync)'),
+        '14': (None,  None,  'PVST+ BPDU',         'pvst',   'Cisco',    'PVST+/Rapid-PVST+ — Cisco Per-VLAN Spanning Tree'),
+        '15': (None,  None,  'UDLD PDU',           'udld',   'Cisco',    'UDLD — Cisco Uni-Directional Link Detection'),
+        '16': (None,  None,  'FC Native Frame',    'fc',     'Storage',  'Fibre Channel — SOF+Header(24B)+Payload+CRC+EOF + 8b/10b encoding'),
     }
-    for k, (et, pdu, l3, cat, desc) in FIXED_INFO.items():
+    for k, (et, _r, pdu, l3, cat, desc) in FIXED_INFO.items():
         et_str = f"0x{et:04X}" if et else '802.3+LLC/SNAP'
         sel[k] = ('fixed', L3_DISPATCH_FIXED[k], et_str, pdu, l3, cat, desc, et)
 
-    # ── All EtherTypes from l2_builder (skip those already covered by 1-11) ──
+    # ── All EtherTypes from l2_builder (skip those already covered by 1-16) ──
     if not _L2_AVAILABLE:
         return sel
 
@@ -3376,7 +4564,7 @@ def _build_eth_selection_map() -> dict[str, object]:
 
     # Group by category for numbered display
     CAT_ORDER = ['Standard', 'Industry', 'Vendor', 'Private', 'Historical']
-    num = 12   # starts right after the 11 fixed flows
+    num = 17   # starts right after the 16 fixed flows
     for cat in CAT_ORDER:
         entries = [(et, v) for et, v in sorted(ETHERTYPE_REGISTRY.items())
                    if v['category'] == cat and et not in ALREADY_COVERED]
@@ -3401,6 +4589,7 @@ def _build_eth_selection_map() -> dict[str, object]:
 
 # Build once at module level
 _ETH_SEL_MAP: dict = {}   # populated on first print_eth_menu() call
+_ETH_PHY_SPEED: str = 'MAC_ONLY'  # set in main() before any flow runs
 
 
 def print_eth_menu():
@@ -3463,15 +4652,20 @@ def print_eth_menu():
             l4_hint = {
                 '1' : 'arp_request / arp_reply',
                 '2' : '→ L4 sub-menu (ICMP/TCP/UDP/…)',
-                '3' : 'bpdu_config / tcn / rstp',
-                '4' : 'dtp_tlvs',
-                '5' : 'pagp_tlvs',
-                '6' : 'lacp_actor_partner',
-                '7' : 'pause_quanta',
-                '8' : 'pfc_per_priority×8',
-                '9' : 'lldp_tlvs',
-                '10': 'vlan_dot1q / qinq',
-                '11': 'any_oversized',
+                '3' : 'stp_bpdu/rstp_bpdu/mstp_bpdu/pvst_bpdu',
+                '4' : 'dtp_domain/status/type/neighbor TLVs',
+                '5' : 'pagp_group_cap/group_ifidx/port_name',
+                '6' : 'lacp_actor+partner+collector TLVs',
+                '7' : 'pause_quanta × 512bit-times',
+                '8' : 'pfc_priority_enable + quanta[0-7]',
+                '9' : 'lldp_chassisID+portID+TTL+orgSpec TLVs',
+                '10': 'vlan_dot1q / qinq s-tag+c-tag',
+                '11': 'any_oversized_payload',
+                '12': 'cdp_deviceID+portID+capabilities+platform TLVs',
+                '13': 'vtp_summary/subset/request/join PDU',
+                '14': 'pvst+_bpdu / rapid-pvst+_bpdu + VLAN TLV',
+                '15': 'udld_probe/echo/flush + device+port TLVs',
+                '16': 'SOFi3/SOFn3/SOFf + FC-header(24B) + FCP/ELS/BLS + CRC + EOFt/EOFn/EOFa',
             }.get(num_s, '—')
 
             print(f"  {C.BOLD}{C.L3}  {num_s:>4}{C.RESET}  "
@@ -3549,7 +4743,7 @@ def print_main_menu():
     if _L2_AVAILABLE:
         from l2_builder import (ETHERTYPE_REGISTRY, WAN_PROTOCOL_REGISTRY,
                                  WIFI_SPEED_TABLE, WIFI_FRAME_CATEGORY)
-        n_eth=11; n_et=len(ETHERTYPE_REGISTRY); n_wan=len(WAN_PROTOCOL_REGISTRY)
+        n_eth=16; n_et=len(ETHERTYPE_REGISTRY); n_wan=len(WAN_PROTOCOL_REGISTRY)
         n_wifi=len(WIFI_SPEED_TABLE); n_wfcat=len(WIFI_FRAME_CATEGORY)
     else:
         n_eth=11; n_et=174; n_wan=11; n_wifi=21; n_wfcat=4
@@ -3569,7 +4763,12 @@ def print_main_menu():
     if _HW_AVAILABLE:
         hw_s=registry_stats_hw(); n_hw_buses=hw_s['buses']; n_hw_plat=hw_s['platforms']
     else:
-        n_hw_buses=21; n_hw_plat=9
+        n_hw_buses=40; n_hw_plat=9
+
+    if _PHY_AVAILABLE:
+        phy_s=registry_stats_phy(); n_phy_eth=phy_s['eth_speeds']; n_phy_fc=phy_s['fc_speeds']
+    else:
+        n_phy_eth=8; n_phy_fc=4
 
     def row(num, tech, detail):
         return (f"  {C.BOLD}{C.BANNER}║{C.RESET} {C.L2}{num}{C.RESET}  "
@@ -3577,29 +4776,30 @@ def print_main_menu():
     def sub(txt):  return f"  {C.BANNER}║{C.RESET}     {C.DIM}{txt}{C.RESET}"
     def div():     return f"  {C.BANNER}╠{'═'*78}╣{C.RESET}"
 
-    eng = ('L2✓ L3✓ L4✓ HW✓' if all([_L2_AVAILABLE,_L3_AVAILABLE,_L4_AVAILABLE,_HW_AVAILABLE])
+    eng = ('L1✓ L2✓ L3✓ L4✓ HW✓' if all([_PHY_AVAILABLE,_L2_AVAILABLE,_L3_AVAILABLE,_L4_AVAILABLE,_HW_AVAILABLE])
+           else 'L2✓ L3✓ L4✓ HW✓' if all([_L2_AVAILABLE,_L3_AVAILABLE,_L4_AVAILABLE,_HW_AVAILABLE])
            else 'partial — check builder files')
     print(f"\n  {C.BANNER}╔{'═'*78}╗{C.RESET}")
     print(f"  {C.BANNER}║{C.RESET}  {C.BOLD}{C.BANNER}{'NETWORK FRAME BUILDER  ─  COMPLETE PROTOCOL SUITE':^76}{C.RESET}  {C.BANNER}║{C.RESET}")
     print(f"  {C.BANNER}║{C.RESET}  {C.DIM}{f'Engines: {eng}':^76}{C.RESET}  {C.BANNER}║{C.RESET}")
     print(div())
-    print(row('1','Ethernet / 802.3',f'{n_eth} full builders | {n_et} EtherTypes | {n_nil} L3 stacks | {n_nil4} L4 handlers'))
-    print(sub('ARP · IPv4(→L4 sub-menu) · STP · DTP · PAgP · LACP · Pause · PFC · LLDP · VLAN · Jumbo'))
-    print(sub('Storage: FCoE FIP AoE RoCE iSCSI NVMe  Switch: EAPOL MACSec CFM Y.1731 PTP MRP TRILL'))
+    print(row('1','Ethernet / 802.3',f'{n_eth} full builders | {n_et} EtherTypes | {n_nil} L3 | {n_nil4} L4'))
+    print(sub(f'PHY: {n_phy_eth} speeds (10M→400G) Manchester/MLT-3/8b10b/64b66b/PAM4 + FC {n_phy_fc} speeds'))
+    print(sub('ARP · IPv4(→L4) · STP/RSTP/MSTP · DTP · PAgP · LACP · Pause · PFC · LLDP · VLAN · Jumbo'))
+    print(sub('CDP · VTP · PVST+ · UDLD  ·  FCoE · FIP · AoE · RoCE · iSCSI · NVMe  ·  +174 EtherTypes'))
     print(div())
-    print(row('2','Serial / WAN',f'{n_wan} protocols  (Raw·SLIP·PPP·HDLC·Cisco-HDLC·Modbus·ATM·KISS·COBS)'))
-    print(sub('HDLC: I-frame(data) · S-frame(supervisory) · U-frame(link mgmt)'))
+    print(row('2','Serial / WAN',f'{n_wan} protocols  ·  PHY: NRZ/NRZI encoding  (RS-232/485/HDLC/CAN)'))
+    print(sub('HDLC: I-frame · S-frame · U-frame  ·  PHY: Manchester/MLT-3/NRZ/NRZI selectable'))
     print(div())
     print(row('3','WiFi / 802.11',f'{n_wifi} PHY standards  ·  {n_wfcat} frame categories'))
-    print(sub('802.11a/b/g/n/ac/ax/be · ad/ay(60GHz) · p(V2X) · s(Mesh) · ah(HaLow) · j/r/u/v/w/k/y'))
+    print(sub('802.11a/b/g/n/ac/ax/be · ad/ay(60GHz) · p(V2X) · s(Mesh) · ah(HaLow)'))
     print(div())
     print(row('4','Standalone IPv4',f'Full RFC 791  ·  {n_ip} protocols  ·  options  ·  L4 payload'))
     print(sub('ICMP(19 types) · TCP(11 states) · UDP(41 ports) · GRE · ESP · AH · OSPF · SCTP'))
     print(div())
     print(row('5','Hardware / Bus Frame',f'{n_hw_buses} bus protocols  ·  {n_hw_plat} platform categories'))
-    print(sub('Consumer · Server · Router · Switch · Firewall · IDS/IPS · NAC · Industrial · Embedded'))
-    print(sub('PCIe TLP/DLLP · USB3/2 · HDMI · DisplayPort · SATA FIS · NVMe · IPMI/SOL · Thunderbolt'))
-    print(sub('CAN FD · FlexRay · UART · DDR5 · AES67 · Modbus TCP · Broadcom Higig2 · DMA Desc'))
+    print(sub('PCIe TLP/DLLP/VDM/SR-IOV · CXL · USB · HDMI · DP · SATA · NVMe · IPMI · TB4'))
+    print(sub('CAN FD · FlexRay · JTAG · I2C · SPI · MIPI · DDR4/5 · HBM3 · InfiniBand'))
     print(f"  {C.BANNER}╚{'═'*78}╝{C.RESET}")
 
 
@@ -4314,6 +5514,18 @@ def main():
 
     # ── Option 1: Ethernet ────────────────────────────────────────────────────
     if top == '1':
+        # Step 1: Ask processing mode (PHY layer or MAC layer only)
+        phy_mode = ask_phy_mode()
+
+        if phy_mode == 'phy':
+            # Step 2A: PHY layer selected — ask speed variant
+            speed_key = ask_eth_phy_speed()
+            # Store in global so all flow functions can access
+            _ETH_PHY_SPEED = speed_key
+        else:
+            # Step 2B: MAC layer only — use default Preamble+SFD
+            _ETH_PHY_SPEED = 'MAC_ONLY'
+
         print_eth_menu()
         total   = len(_ETH_SEL_MAP)
         fixed_n = sum(1 for e in _ETH_SEL_MAP.values() if e[0]=='fixed')
