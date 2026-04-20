@@ -1200,9 +1200,9 @@ STORAGE_L4_REGISTRY: dict[str, dict] = {
             "VLAN ID": "2B  VLAN carrying FCoE traffic (1-4094)",
             "CAUTION": "ENode must switch to discovered VLAN before sending FIP solicitation",
         },
+        applications='FCoE VLAN discovery — FIP VLAN notification for FCoE fabric VLAN assignment',
     ),
 
-    # ── AoE ───────────────────────────────────────────────────────────────────
     "aoe_ata": dict(
         name="AoE ATA Command",
         transport="ATA disk command over Ethernet — no IP/TCP",
@@ -1236,9 +1236,9 @@ STORAGE_L4_REGISTRY: dict[str, dict] = {
             "Config String":"variable  target config data (e.g. storage device info)",
             "CAUTION":      "Buffer Count limits pipeline depth — exceed it = lost frames and retransmit",
         },
+        applications='AoE storage configuration — AoE device capability query/response',
     ),
 
-    # ── RoCE ──────────────────────────────────────────────────────────────────
     "roce_verb": dict(
         name="RoCE v1 RDMA Verb (Send/Write/Read)",
         transport="RDMA over lossless Ethernet — zero copy",
@@ -1276,9 +1276,9 @@ STORAGE_L4_REGISTRY: dict[str, dict] = {
             "ICRC":     "4B",
             "CAUTION":  "NAK code 0x60=RNR-NAK (retry-later) — implement RNR retry timer or sender stalls",
         },
+        applications='RoCE v1 reliable connection ACK/NAK — acknowledgement for RC and UC transport',
     ),
 
-    # ── iSCSI ─────────────────────────────────────────────────────────────────
     "iscsi_scsi": dict(
         name="iSCSI SCSI Command/Response PDU",
         transport="iSCSI over direct Ethernet (no TCP)",
@@ -1319,6 +1319,7 @@ STORAGE_L4_REGISTRY: dict[str, dict] = {
             "Data":      "variable  actual SCSI data (read or write)",
             "CAUTION":   "BufferOffset + DataSegLen must not exceed ExpectedDataTransferLength",
         },
+        applications='iSCSI block storage data transfer — Data-In (target→initiator) and Data-Out',
     ),
     "iscsi_nop": dict(
         name="iSCSI NOP (keepalive)",
@@ -1333,9 +1334,9 @@ STORAGE_L4_REGISTRY: dict[str, dict] = {
             "Data":      "optional  ping data (echoed back)",
             "CAUTION":   "NOP-Out with ITT≠0xFFFFFFFF expects NOP-In response — no response = session timeout",
         },
+        applications='iSCSI NOP keepalive — connection health check and latency measurement',
     ),
 
-    # ── NVMe ──────────────────────────────────────────────────────────────────
     "nvme_cmd": dict(
         name="NVMe Command Capsule (SQE — Submission Queue Entry)",
         transport="NVMe-oF L2 command submission",
@@ -1375,6 +1376,7 @@ STORAGE_L4_REGISTRY: dict[str, dict] = {
             "SCT":       "3b  Status Code Type: 0=Generic 1=CmdSpecific 2=MediaError",
             "CAUTION":   "Phase Tag mismatch means stale CQE — always check P bit matches expected phase",
         },
+        applications='NVMe-oF completion capsule — command response with status and result value',
     ),
     "nvme_data": dict(
         name="NVMe H2C/C2H Data PDU",
@@ -1390,9 +1392,9 @@ STORAGE_L4_REGISTRY: dict[str, dict] = {
             "Data":      "variable  actual NVMe data (4B aligned)",
             "CAUTION":   "DATAO must be 4B aligned — misaligned offsets = PDU error and CQE failure",
         },
+        applications='NVMe-oF data capsule — host-to-controller and controller-to-host data transfer',
     ),
 
-    # ── CFM / Y.1731 ──────────────────────────────────────────────────────────
     "cfm_ccm": dict(
         name="CFM CCM (Continuity Check Message)",
         transport="IEEE 802.1ag L2 OAM — periodic heartbeat",
@@ -1554,6 +1556,7 @@ STORAGE_L4_REGISTRY: dict[str, dict] = {
             "EAPOL Length":  "2B  0x0000 (no data)",
             "CAUTION":       "EAPOL-Logoff sent unprotected — rogue logoff possible without MFP (802.11w)",
         },
+        applications='EAPOL-Start/Logoff — IEEE 802.1X session initiation and termination control',
     ),
     "lldp_tlv": dict(
         name="LLDP TLV (Type-Length-Value)",
@@ -1810,6 +1813,7 @@ STORAGE_L4_REGISTRY: dict[str, dict] = {
             "Data":      "variable  payload",
             "CAUTION":   "Deprecated — no security, no auth; use iSCSI (TCP port 3260) or FCoE instead",
         },
+        applications='HyperSCSI SCSI over Ethernet — deprecated storage protocol (use iSCSI/FCoE)',
     ),
     "iser_pdu": dict(
         name="iSER PDU (iSCSI Extensions for RDMA)",
@@ -1837,6 +1841,7 @@ STORAGE_L4_REGISTRY: dict[str, dict] = {
             "Payload": "variable  IP payload",
             "CAUTION": "Rarely used — FCoE normally carries FCP SCSI, not raw IP",
         },
+        applications='IP over Fibre Channel — IPv4/IPv6 inside FC frames over FCoE (FC-BB-5)',
     ),
     "fip_linkserv": dict(
         name="FIP Link Service (FLOGI/FDISC/LOGO over FIP)",
@@ -1865,6 +1870,7 @@ STORAGE_L4_REGISTRY: dict[str, dict] = {
             "Local MAC":"6B  ENode MAC",
             "CAUTION":  "FKA_ADV_Period default 8s — no keep-alive within 3×period = FCF drops virtual link",
         },
+        applications='FCoE FIP control — FC fabric keep-alive and virtual link maintenance for FCoE endpoints',
     ),
     "aoe_macmask": dict(
         name="AoE MAC Mask List (access control)",
@@ -1877,6 +1883,7 @@ STORAGE_L4_REGISTRY: dict[str, dict] = {
             "Directives":"variable  4B each: Reserved(1B)+Cmd(1B)+MAC(6B) Cmd: 0=NoDirective 1=Add 2=Delete 255=DeleteAll",
             "CAUTION":  "Empty ACL = all MACs allowed — explicitly add allowed MACs before deploying to production",
         },
+        applications='AoE MAC mask — access control list configuration for AoE storage device ports',
     ),
     "iscsi_r2t": dict(
         name="iSCSI R2T (Ready to Transfer — write flow control)",
@@ -1907,6 +1914,7 @@ STORAGE_L4_REGISTRY: dict[str, dict] = {
             "Payload":       "variable  organisation-specific frame content",
             "CAUTION":       "OUI must be your registered IEEE OUI — using another org's OUI violates IEEE 802 policy",
         },
+        applications='IEEE 802 OUI Extended payload — organisation-specific protocol data per IEEE 802 §9',
     ),
     "mih_pdu": dict(
         name="MIH PDU (IEEE 802.21 Media Independent Handover)",
@@ -1929,7 +1937,9 @@ STORAGE_L4_REGISTRY: dict[str, dict] = {
     "netbios":   dict(name="NetBIOS over IPX (type-20)",  transport="broadcast propagation", header_bytes=0, fields={"Data":"NetBIOS datagram payload"}),
     "snmp":      dict(name="SNMP over DDP (AppleTalk)",   transport="SNMP management", header_bytes=0, fields={"Data":"SNMPv1/v2c PDU"}),
     "aurp":      dict(name="AURP (AppleTalk Update Routing)", transport="WAN routing", header_bytes=4, fields={"ConnectionID":"2B","Sequence":"2B","Data":"variable AURP tuples"}),
-    "pup_error": dict(name="Xerox PUP Error",             transport="error notification", header_bytes=4, fields={"Error Code":"2B","Error Param":"2B","Original":"first 22B of offending PUP"}),
+    "pup_error": dict(name="Xerox PUP Error", transport="error notification", header_bytes=4,
+        fields={"Error Code":"2B  error type code","Error Param":"2B  error-specific parameter","Original":"variable  first 22B of offending PUP datagram"},
+        applications="PUP Error — Xerox PARC Universal Packet delivery error reporting (1970s historical)"),
     "pup_echo":  dict(name="Xerox PUP Echo/Echo Reply",   transport="reachability test", header_bytes=2, fields={"Type":"2B 130=Request 131=Reply","Data":"variable echoed data"}),
     # ── Additional L4 handlers for new EtherTypes ─────────────────────────────
     "pbb_payload": dict(
@@ -1941,6 +1951,7 @@ STORAGE_L4_REGISTRY: dict[str, dict] = {
                 "Inner EtherType":"2B customer protocol (0x0800=IPv4 etc.)",
                 "Customer Payload":"variable original customer Ethernet payload",
                 "CAUTION":"I-SID collision causes cross-customer frame delivery — unique I-SID per service mandatory"},
+        applications='IEEE 802.1ah PBB — inner customer Ethernet frame inside MAC-in-MAC provider backbone',
     ),
     "avtp_aaf": dict(
         name="AVTP AAF (Audio — IEEE 1722)",
@@ -1981,6 +1992,7 @@ STORAGE_L4_REGISTRY: dict[str, dict] = {
                 "CRF Data Count":"4B number of timestamps in payload",
                 "CRF Timestamps":"variable 8B PTP timestamps × count",
                 "CAUTION":"Base frequency must match across all listeners — mismatch causes clock drift and AV sync failure"},
+        applications='IEEE 1722 CRF — Clock Reference Format stream for AVB/TSN media clock distribution',
     ),
     "avtp_iec61883": dict(
         name="AVTP IEC 61883 (FireWire A/V over AVTP)",
@@ -1990,6 +2002,7 @@ STORAGE_L4_REGISTRY: dict[str, dict] = {
                 "CIP DBC":"1B data block counter","CIP Fmt":"6b 0x10=61883-4(DV) 0x20=61883-6(audio) 0x22=61883-8(MIDI)",
                 "CIP FDF":"3B format-dependent field","Payload":"variable A/V data blocks",
                 "CAUTION":"DBC must be monotonically increasing — reset causes audio glitch on receiver"},
+        applications='IEEE 1722 IEC 61883 — audio/video stream (DV/MPEG-2/PCM audio) over AVB networks',
     ),
     "avtp_ctrl": dict(
         name="AVTP Control Message (IEEE 1722)",
@@ -1998,6 +2011,7 @@ STORAGE_L4_REGISTRY: dict[str, dict] = {
         fields={"Control Data Length":"2B","Stream Data Length":"2B",
                 "Control Data":"variable AVTP control payload",
                 "CAUTION":"Control messages must not use reserved subtypes — reserved subtype = undefined behaviour"},
+        applications='IEEE 1722 AVTP Control — non-timed control format for AVB/TSN device management',
     ),
     "bfd_control": dict(
         name="BFD Control Packet (RFC 5880)",
@@ -2039,6 +2053,7 @@ STORAGE_L4_REGISTRY: dict[str, dict] = {
                 "Inner EtherType":"2B 0x0800=IPv4 etc.",
                 "Inner Payload":"variable — original frame payload",
                 "CAUTION":"ARP broadcasts inside GRE flood to all tunnel endpoints — use proxy ARP or limit broadcast domains"},
+        applications='GRE transparent Ethernet bridging — inner L2 Ethernet frame tunnelled via GRE (RFC 1701)',
     ),
     "gre_inner_fr": dict(
         name="GRE Inner Frame Relay",
@@ -2049,6 +2064,7 @@ STORAGE_L4_REGISTRY: dict[str, dict] = {
                 "Information":"variable frame relay payload",
                 "FCS":"2B CRC-16-CCITT",
                 "CAUTION":"DLCI 0 is reserved for LMI signalling — data frames must use DLCI 16-991"},
+        applications='GRE Frame Relay encapsulation — Frame Relay frames tunnelled over GRE/IP (RFC 1701)',
     ),
     "gre_ctrl_msg": dict(
         name="GRE Control Message (RFC 8157)",
@@ -2059,6 +2075,7 @@ STORAGE_L4_REGISTRY: dict[str, dict] = {
                 "Error Code":"2B (Error type) — error reason",
                 "BFD Discrim":"4B (BFD-Discrim type) — local discriminator",
                 "CAUTION":"Keepalive-Req expects Keepalive-Reply within hold timer — missing reply = tunnel teardown"},
+        applications='GRE control message — PPTP-compatible keepalive and GRE tunnel management signalling',
     ),
     "vjcomp_pdu": dict(
         name="Van Jacobson Compressed TCP/IP",
@@ -2071,6 +2088,7 @@ STORAGE_L4_REGISTRY: dict[str, dict] = {
                 "Seq Num":"optional 4B (if changed)","IP ID Delta":"optional 2B",
                 "Checksum":"2B","Data":"variable — TCP payload",
                 "CAUTION":"Compression state must be flushed (uncompressed) after any packet loss — desync causes all subsequent packets to fail"},
+        applications='Van Jacobson TCP/IP header compression — reduces serial WAN bandwidth usage per RFC 1144',
     ),
     "ppp_lcp": dict(
         name="PPP LCP (Link Control Protocol)",
@@ -2111,6 +2129,7 @@ STORAGE_L4_REGISTRY: dict[str, dict] = {
                 "Session Number":"4B per-adjacency session",
                 "Payload":"variable type-specific data",
                 "CAUTION":"No authentication — GSMP must be confined to management VLAN; never expose to untrusted hosts"},
+        applications='GSMP switch management — ATM/Frame Relay to Ethernet switch fabric control (RFC 3292)',
     ),
     "mcap_msg": dict(
         name="MCAP Message",
@@ -2122,6 +2141,7 @@ STORAGE_L4_REGISTRY: dict[str, dict] = {
                 "Timestamp":"8B 802.11 TSF time for channel start",
                 "Duration":"2B channel duration in TUs (×1024µs)",
                 "CAUTION":"Timestamp must be coordinated with 802.11 BSS TSF — wrong timestamp causes channel miss"},
+        applications='MCAP — IEEE 802.11 Multicast Channel Allocation Protocol for wireless coexistence',
     ),
     "lowpan_iphc": dict(
         name="6LoWPAN IPHC Compressed IPv6",
@@ -2134,6 +2154,7 @@ STORAGE_L4_REGISTRY: dict[str, dict] = {
                 "M":"1b multicast compression","DAC":"1b destination addr compression",
                 "DAM":"2b destination addr mode","Payload":"variable compressed fields",
                 "CAUTION":"SAM/DAM context must be provisioned on all nodes — missing context = decompression failure and packet drop"},
+        applications='6LoWPAN IPHC — IPv6 header compression for 127-byte IEEE 802.15.4 IoT frames',
     ),
     "lowpan_mesh": dict(
         name="6LoWPAN Mesh Header",
@@ -2144,6 +2165,7 @@ STORAGE_L4_REGISTRY: dict[str, dict] = {
                 "Orig Addr":"2B or 8B mesh originator address",
                 "Final Addr":"2B or 8B mesh final destination",
                 "CAUTION":"HopsLeft must be > diameter of mesh network — too-small value causes premature discard"},
+        applications='6LoWPAN mesh addressing — multi-hop routing header for IEEE 802.15.4 mesh networks',
     ),
     "lowpan_frag": dict(
         name="6LoWPAN Fragmentation Header",
@@ -2155,6 +2177,7 @@ STORAGE_L4_REGISTRY: dict[str, dict] = {
                 "Datagram Offset":"1B (subsequent frags only) byte offset ÷8",
                 "Payload":"variable fragment data",
                 "CAUTION":"Reassembly timer default 60s — fragment storm causes memory exhaustion in constrained devices"},
+        applications='6LoWPAN fragmentation — large IPv6 packet fragmented across multiple 802.15.4 frames',
     ),
     "loopback_test": dict(
         name="Ethernet Loopback Test Pattern",
@@ -2171,6 +2194,7 @@ STORAGE_L4_REGISTRY: dict[str, dict] = {
         header_bytes=0,
         fields={"Inner EtherType":"2B original frame type","Payload":"variable original frame data",
                 "CAUTION":"Sequence number window must be > max propagation delay difference between paths — narrow window = valid duplicate frames discarded"},
+        applications='IEEE 802.1CB FRER — sequence-tagged frame for TSN stream replication and elimination',
     ),
     "ipv4_inner": dict(
         name="Inner IPv4 (inside Q-in-Q tunnel)",
@@ -2235,6 +2259,7 @@ STORAGE_L4_REGISTRY: dict[str, dict] = {
             "Queue Length": "2B per queue  (Report) bytes pending in each queue",
             "CAUTION":      "MPCP timestamp rollover at 2^32 × 16ns ≈ 68s — OLT and ONU must handle rollover consistently or grants become misaligned",
         },
+        applications='IEEE 802.3av MPCP — EPON Multi-Point Control Protocol for OLT-ONU registration and bandwidth',
     ),
     "lacp_actor_partner": dict(
         name="LACP Actor+Partner TLVs (IEEE 802.3ad)",
@@ -2284,6 +2309,7 @@ STORAGE_L4_REGISTRY: dict[str, dict] = {
             "Padding":         "90B  to 128B total",
             "CAUTION":         "Marker is used to verify all frames from a port have been received before rebalancing — improper implementation causes out-of-order delivery during LAG rebalance",
         },
+        applications='LACP Marker PDU — loopback path detection for LAG bundles per IEEE 802.3 Clause 43',
     ),
     "oam_pdu": dict(
         name="Ethernet OAM PDU (IEEE 802.3ah — EFM OAM)",
@@ -2311,6 +2337,7 @@ STORAGE_L4_REGISTRY: dict[str, dict] = {
             "Payload":   "variable  organisation-specific PDU content",
             "CAUTION":   "OSSP frames not recognised by peer are silently discarded — verify OUI registration before deployment",
         },
+        applications='OSSP — Organisation Specific Slow Protocol vendor-defined extension for custom slow-proto PDUs',
     ),
     "cdp_tlv": dict(
         name="CDP TLV (Cisco Discovery Protocol)",
@@ -6235,3 +6262,18 @@ EXTENDED_ACTIVE_L4_REGISTRY: dict[str, dict] = {
 }
 
 NON_IP_L4_REGISTRY.update(EXTENDED_ACTIVE_L4_REGISTRY)
+
+# AppleTalk AURP — standalone addition
+NON_IP_L4_REGISTRY["aurp"] = dict(
+    name="AppleTalk AURP — AppleTalk Update Routing Protocol",
+    transport="AppleTalk DDP Type 11 (tunnel socket 0x0066) — WAN tunnel for remote AppleTalk zones",
+    header_bytes=8,
+    fields={
+        "Connection ID":  "2B  identifies AURP connection between peer routers",
+        "Sequence":       "2B  monotonically increasing for reliable delivery",
+        "Command":        "2B  1=Open-Req 2=Open-Ack 3=Router-Down 4=Zone-Info 5=Update 6=Get-Update-Req 7=RD-Close",
+        "Flags":          "2B  B(bidirectional)+HB(hop-count-carry)+version(3b)",
+        "CAUTION":        "AURP completely obsolete — Apple deprecated AppleTalk in macOS 10.6 (2009); only on pre-2009 Mac networks",
+    },
+    applications="AppleTalk AURP — Update Routing Protocol for WAN-connected AppleTalk zones (obsolete 2009)",
+)
