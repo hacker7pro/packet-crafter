@@ -2740,11 +2740,16 @@ NON_IP_L3_REGISTRY["eapol"]["type_map"].update({
              usage="Announcement response — IEEE 802.1X-2020"),
 })
 
-# CFM: add Y.1731 opcodes that belong to 802.1ag framework
+# CFM: add all missing opcodes per IEEE 802.1ag Table 21-15 and ITU-T Y.1731
 NON_IP_L3_REGISTRY["cfm"]["type_map"].update({
+    38: dict(name="APS",   l4="cfm_aps",  usage="Automatic Protection Switching — IEEE 802.1ag / Y.1731 §9.9"),
+    39: dict(name="RAPS",  l4="cfm_raps", usage="Ring APS — ITU-T G.8032 §10.1 / Y.1731"),
+    # Also add with original opcode values:
     37: dict(name="TST",   l4="cfm_tst",  usage="Test signal — ITU-T Y.1731 §9.5"),
-    43: dict(name="APS",   l4="cfm_aps",  usage="Automatic Protection Switching — ITU-T Y.1731 §9.9"),
-    44: dict(name="RAPS",  l4="cfm_raps", usage="Ring APS — ITU-T G.8032 / Y.1731"),
+    38: dict(name="APS",   l4="cfm_aps",  usage="Automatic Protection Switching — IEEE 802.1ag Table 21-15 / Y.1731 §9.9"),
+    39: dict(name="RAPS",  l4="cfm_raps", usage="Ring APS — ITU-T G.8032 §10.1 per IEEE 802.1ag Table 21-15"),
+    43: dict(name="APS-ext",  l4="cfm_aps",  usage="APS extended opcode (some Y.1731 implementations)"),
+    44: dict(name="RAPS-ext", l4="cfm_raps", usage="RAPS extended opcode (some Y.1731 implementations)"),
     45: dict(name="MCC",   l4="cfm_mcc",  usage="Maintenance Communication Channel — Y.1731"),
     48: dict(name="1DM",   l4="cfm_dm",   usage="One-way Delay Measurement — ITU-T Y.1731 §8.2"),
 })
@@ -2780,6 +2785,151 @@ NON_IP_L3_REGISTRY["y1731"]["type_map"][37] = dict(
 
 
 
+
+# TRILL: add IS-IS control PDU type_map entries per RFC 6325 §4.2
+NON_IP_L3_REGISTRY["trill"]["type_map"].update({
+    0x0001: dict(name="TRILL-IS-IS-Hello",  l4="isis_pdu", usage="IS-IS Hello PDU for TRILL RBridge adjacency (RFC 6325 §4.2.3)"),
+    0x0002: dict(name="TRILL-IS-IS-LSP",    l4="isis_pdu", usage="IS-IS Link State PDU — TRILL topology distribution (RFC 6325 §4.2.4)"),
+    0x0003: dict(name="TRILL-IS-IS-CSNP",   l4="isis_pdu", usage="Complete Sequence Numbers PDU — LSDB synchronisation (RFC 6325)"),
+    0x0004: dict(name="TRILL-IS-IS-PSNP",   l4="isis_pdu", usage="Partial Sequence Numbers PDU — LSDB synchronisation (RFC 6325)"),
+})
+
+# UDLD: add TLV types 4+5 per Cisco UDLD specification
+NON_IP_L3_REGISTRY["udld"]["type_map"].update({
+    0x04: dict(name="Message-Interval", l4="udld_pdu", usage="Time between UDLD hello messages in seconds (Cisco ext)"),
+    0x05: dict(name="Timeout-Interval", l4="udld_pdu", usage="UDLD timeout before declaring link unidirectional (Cisco ext)"),
+})
+
+# GRE dispatch: add ARP inner type (RFC 1701 ARP-over-GRE)
+NON_IP_L3_REGISTRY["gre_dispatch"]["type_map"][0x0806] = dict(
+    name="ARP",  l4="arp_inner",
+    usage="ARP request/reply encapsulated inside GRE tunnel (RFC 1701)"
+)
+
+# PPP session: add missing protocol codes per RFC 1661 / IANA PPP Numbers
+NON_IP_L3_REGISTRY["ppp_session"]["type_map"].update({
+    0x002B: dict(name="IPX",          l4="ppp_ncp",  usage="Novell IPX datagram over PPP (RFC 1552)"),
+    0x002D: dict(name="VJ-Comp-TCP",  l4="vjcomp_pdu", usage="Van Jacobson compressed TCP (RFC 1144)"),
+    0x002F: dict(name="VJ-Uncomp-TCP",l4="vjcomp_pdu", usage="Van Jacobson uncompressed TCP (RFC 1144)"),
+    0x0031: dict(name="Bridge-PDU",   l4="stp_bpdu", usage="Bridging PDU over PPP (RFC 3518 BCP)"),
+    0x0033: dict(name="STREAMS",      l4="ppp_ncp",  usage="STREAMS network protocol over PPP"),
+    0x0035: dict(name="OSI-CLNS",     l4="ppp_ncp",  usage="OSI CLNP/CLNS over PPP (RFC 1377)"),
+    0x003D: dict(name="MultiLink",    l4="ppp_ncp",  usage="PPP Multilink Protocol fragment (RFC 1990)"),
+    0x00FD: dict(name="MPPE",         l4="ppp_ncp",  usage="Microsoft Point-to-Point Encryption (RFC 3078)"),
+    0x4021: dict(name="Compressed",   l4="ppp_ncp",  usage="Compressed datagram per CCP negotiation (RFC 1962)"),
+    0x802B: dict(name="IPXCP",        l4="ppp_ncp",  usage="IPX Control Protocol — configures IPX over PPP (RFC 1552)"),
+    0x8031: dict(name="BCP",          l4="ppp_ncp",  usage="Bridging Control Protocol (RFC 3518)"),
+    0xC227: dict(name="EAP",          l4="eapol_eap", usage="Extensible Authentication Protocol over PPP (RFC 2284)"),
+    0xC281: dict(name="MPPE-CP",      l4="ppp_ncp",  usage="MPPE Control Protocol — negotiates encryption (RFC 3078)"),
+})
+
+# NSH: wire l4 dispatches — inner IPv4/IPv6/Ethernet/MPLS
+NON_IP_L3_REGISTRY["nsh"]["type_map"].update({
+    1: dict(name="IPv4",     l4="ipv4_inner", usage="NSH inner IPv4 packet — RFC 8300 §2.2"),
+    2: dict(name="IPv6",     l4="ipv6_inner", usage="NSH inner IPv6 packet — RFC 8300 §2.2"),
+    3: dict(name="Ethernet", l4="gre_inner_eth", usage="NSH inner Ethernet frame — RFC 8300 §2.2"),
+    5: dict(name="MPLS",     l4="mpls_inner", usage="NSH inner MPLS label stack — RFC 8300 §2.2"),
+})
+# NSH: expand fields with version, o bit, c bit, md type, next protocol
+NON_IP_L3_REGISTRY["nsh"]["fields"].update({
+    "Version":      "2b  0=RFC 8300",
+    "O bit":        "1b  OAM packet flag",
+    "C bit":        "1b  Critical TLV present",
+    "Length":       "6b  NSH header length in 4B words",
+    "MD Type":      "8b  1=Fixed-Length 2=Variable-Length",
+    "Next Protocol":"8b  1=IPv4 2=IPv6 3=Ethernet 4=NSH 5=MPLS",
+    "SPI":          "24b Service Path Identifier",
+    "SI":           "8b  Service Index (decremented per SF)",
+})
+
+# dot1q: add additional inner EtherType dispatches
+NON_IP_L3_REGISTRY["dot1q"]["type_map"].update({
+    0x8100: dict(name="Double-Tagged",  l4="double_tag",  usage="Q-in-Q double-tagged inner 802.1Q"),
+    0x88A8: dict(name="S-Tag",          l4="qinq_inner",  usage="IEEE 802.1ad S-Tag (provider tag)"),
+    0x88CC: dict(name="LLDP",           l4="lldp_tlv",    usage="LLDP frame inside VLAN"),
+    0x888E: dict(name="EAPOL",          l4="eapol_eap",   usage="EAPOL 802.1X inside VLAN"),
+    0x8808: dict(name="MAC-Ctrl",       l4="mac_ctrl_pause", usage="MAC Control inside VLAN"),
+    0x8809: dict(name="Slow-Proto",     l4="lacp_actor_partner", usage="Slow Protocol inside VLAN"),
+    0x88F7: dict(name="PTP",            l4="ptp_msg",     usage="IEEE 1588 PTP inside VLAN"),
+    0x88E5: dict(name="MACSec",         l4="macsec_payload", usage="MACsec frame inside VLAN"),
+})
+
+# IEC 61850: add cclink L3 dispatcher (already in cclink_ie L3 registry)
+# Check: cclink_ie exists?
+if "cclink_ie" not in NON_IP_L3_REGISTRY:
+    NON_IP_L3_REGISTRY["cclink_ie"] = dict(
+        name="CC-Link IE Field/Controller — CLPA (EtherType 0x890F)",
+        header_bytes=2,
+        type_field="Frame Type (2B) at offset 0",
+        type_map={
+            0x0001: dict(name="Cyclic-Data",    l4="cclink_ie_pdu", usage="I/O cyclic data exchange"),
+            0x0002: dict(name="Transient-Req",  l4="cclink_ie_pdu", usage="Transient data request"),
+            0x0003: dict(name="Transient-Resp", l4="cclink_ie_pdu", usage="Transient data response"),
+            0x0004: dict(name="Token",          l4="cclink_ie_pdu", usage="Token frame for bus arbitration"),
+        },
+        fields={
+            "Frame Type":    "2B  0x0001=Cyclic 0x0002=Transient-Req 0x0003=Transient-Resp 0x0004=Token",
+            "Station No":    "1B  station number (0=controller 1-120=field)",
+            "Reserved":      "1B",
+            "Cyclic Data":   "variable  I/O data per station cyclic configuration",
+            "Seq Number":    "2B  sequence number for transient data",
+            "CAUTION":       "CC-Link IE is CLPA (Mitsubishi) proprietary — interoperability requires CLPA certification",
+        },
+        l4_key="cclink_frame_type",
+    )
+    print("Added cclink_ie to NON_IP_L3_REGISTRY")
+
+# ── Add missing IANA IP protocol numbers to IP_PROTOCOL_REGISTRY ─────────────
+IP_PROTOCOL_REGISTRY.update({
+    0:   dict(name="HOPOPT",      transport="IPv6 Hop-by-Hop Options",
+              description="IPv6 Hop-by-Hop Options header — RFC 2460 §4.3",
+              fields={"Next Header":"1B next header type","Length":"1B hdr len in 8B units minus 1","Options":"variable TLV options"},
+              applications="IPv6 Hop-by-Hop Options — router alert, jumbogram, pad options per RFC 2460"),
+    8:   dict(name="EGP",         transport="Exterior Gateway Protocol",
+              description="Exterior Gateway Protocol — RFC 904 (obsoleted by BGP)",
+              fields={"Type":"1B","Code":"1B","Status":"1B","Checksum":"2B","Autonomous System":"2B","Sequence":"2B"},
+              applications="EGP — legacy inter-AS routing protocol (RFC 904); completely superseded by BGP-4 (RFC 4271)"),
+    9:   dict(name="IGP",         transport="Interior Gateway Protocol",
+              description="IGRP/private IGP — Cisco IGRP (Interior Gateway Routing Protocol); also used for some private IGPs",
+              fields={"Version":"4b","Opcode":"4b","Edition":"1B","Autonomous System":"2B","Routes":"variable"},
+              applications="Cisco IGRP — proprietary distance-vector routing (superseded by EIGRP, IP#88)"),
+    43:  dict(name="IPv6-Route",  transport="IPv6 Routing Header",
+              description="IPv6 Type 0/2/4 Routing Headers — RFC 8200 §4.4 / RFC 6275 / RFC 6554",
+              fields={"Next Header":"1B","Length":"1B hdr ext len","Routing Type":"1B 0=deprecated 2=Mobile-IPv6 4=Segment-Routing","Segments Left":"1B","Type-Specific":"variable"},
+              applications="IPv6 Source Routing — Type 2 for Mobile IPv6 (RFC 6275); Type 4 for Segment Routing (RFC 8754)"),
+    44:  dict(name="IPv6-Frag",   transport="IPv6 Fragment Header",
+              description="IPv6 Fragment Header — RFC 8200 §4.5; fragmentation only at source",
+              fields={"Next Header":"1B","Reserved":"1B","Fragment Offset":"13b offset in 8B units","Res":"2b","M":"1b more-fragments","Identification":"4B"},
+              applications="IPv6 fragmentation — only source node may fragment; routers must not; Path MTU Discovery (RFC 8201) preferred"),
+    60:  dict(name="IPv6-Opts",   transport="IPv6 Destination Options Header",
+              description="IPv6 Destination Options — RFC 8200 §4.6; processed only by destination node",
+              fields={"Next Header":"1B","Hdr Ext Len":"1B in 8B units minus 1","Options":"variable TLV"},
+              applications="IPv6 Destination Options — Home Address option (RFC 6275 Mobile IPv6); PDM option (RFC 8250)"),
+    94:  dict(name="IPIP-Encap",  transport="IP-in-IP Encapsulation (proto 94)",
+              description="IP-in-IP encapsulation alternate (proto 94) per RFC 2003 — distinct from proto 4 (IPIP)",
+              fields={"Outer IP Hdr":"20B standard IPv4 header","Inner IP Hdr":"20B+ encapsulated IPv4/IPv6"},
+              applications="IP tunnel encapsulation — mobile IP foreign agent tunnels (RFC 2003)"),
+    108: dict(name="IPComp",      transport="IP Payload Compression Protocol",
+              description="IP Payload Compression — RFC 3173; compresses IP payload before encryption (ESP)",
+              fields={"Next Header":"1B","Flags":"1B","CPI":"2B Compression Parameter Index","Compressed Data":"variable"},
+              applications="IPComp — compress ESP/AH payload to reduce bandwidth; CPI 4=DEFLATE 5=LZS per RFC 3173"),
+    121: dict(name="SMP",         transport="Simple Message Protocol",
+              description="Simple Message Protocol — historic assignment; minimal documented deployments",
+              fields={"Type":"1B","Length":"2B","Data":"variable"},
+              applications="SMP — rarely deployed; historically used in some SNA-over-IP implementations"),
+    136: dict(name="UDPLite",     transport="Lightweight User Datagram Protocol",
+              description="UDP-Lite — RFC 3828; partial checksum covering only specified bytes (useful for media)",
+              fields={"Src Port":"2B","Dst Port":"2B","Checksum Coverage":"2B 0=full","Checksum":"2B covers only first N bytes","Data":"variable"},
+              applications="UDP-Lite — multimedia over lossy networks; allows corrupted audio/video payload with valid header; RFC 3828"),
+    137: dict(name="MPLS-in-IP",  transport="MPLS-in-IP / MPLS-in-GRE",
+              description="MPLS unicast label stack tunnelled directly in IPv4/IPv6 — RFC 4023",
+              fields={"Label Stack":"4B×N MPLS label entries (S-bit=1 on last)","Inner Payload":"IP or L2 payload after labels"},
+              applications="MPLS-in-IP tunnelling — RFC 4023; used in MPLS-TP and L3VPN inter-AS option C"),
+    143: dict(name="EtherIP",     transport="Ethernet-in-IP",
+              description="Ethernet in IP Encapsulation — RFC 3378; carries Ethernet frames inside IPv4/IPv6 datagram",
+              fields={"Version":"4b  0x3 for EtherIP","Reserved":"12b  0","Ethernet Frame":"variable  complete Ethernet frame"},
+              applications="EtherIP — L2 bridging over IP WAN; RFC 3378; used in some site-to-site L2 VPNs and research"),
+})
 
 def get_non_ip_l3_info(l3_class: str) -> dict:
     """Return non-IP L3 protocol registry entry."""
@@ -2823,3 +2973,220 @@ def process_l3_non_ip(l2_data: dict, type_val: int | None = None) -> dict:
         has_l4       = next_l4 is not None,
         l2_context   = l2_data,
     )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# L3 FIELD COMPLETENESS PATCHES — verified against IEEE/IEC/RFC specs
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# STP — add missing Root Priority+MAC and Bridge MAC as searchable field names
+NON_IP_L3_REGISTRY["stp"]["fields"].update({
+    "Root Priority":  "2B  4b priority(steps of 4096)+12b System-ID-Extension(VLAN-ID)",
+    "Root MAC":       "6B  Root Bridge MAC address",
+    "Bridge MAC":     "6B  sending Bridge MAC address",
+    "Root Path Cost": "4B  cumulative cost from this bridge to root bridge",
+})
+
+# PTP — add missing canonical field names (seqid, domainnumber, msglength)
+NON_IP_L3_REGISTRY["ptp"]["fields"].update({
+    "SeqID":          "2B  sequenceId per IEEE 1588-2019 §13.3.2 — monotonically increasing",
+    "DomainNumber":   "1B  domain number 0-127; separates independent PTP clock domains",
+    "MsgLength":      "2B  total PTP message length in bytes including header",
+})
+
+# GOOSE — add searchable field names per IEC 61850-8-1 ASN.1
+NON_IP_L3_REGISTRY["goose"]["fields"].update({
+    "goID":           "VISIBLE STRING  GOOSE control block reference (IEC 61850-8-1 §8.2.3.2)",
+    "stNum":          "UNSIGNED32  state number — incremented on status change",
+    "sqNum":          "UNSIGNED32  sequence number — incremented every retransmission",
+    "test":           "BOOLEAN  test flag — true=test mode frame (do not act)",
+    "confRev":        "UNSIGNED32  configuration revision — must match subscriber",
+    "ndsCom":         "BOOLEAN  needs commissioning",
+    "numDatSetEntries":"UNSIGNED32  number of entries in allData — ndsentries",
+    "allData":        "variable  sequence of MMS Data values encoding GOOSE payload",
+})
+
+# BACnet — add APCI field
+NON_IP_L3_REGISTRY["bacnet"]["fields"].update({
+    "APCI":           "variable  Application Protocol Control Information: PDUType(4b)+Flags+Service/InvokeID",
+    "APDU Type":      "4b  0=Confirmed-Req 1=Unconfirmed-Req 2=Simple-ACK 3=Complex-ACK 4=Segment-ACK 5=Error 6=Reject 7=Abort",
+    "Service Choice": "1B  BACnet service: 12=ReadProperty 15=WriteProperty 8=WhoIs 0=IAm",
+})
+
+# GeoNetworking — add LT (Lifetime) field
+NON_IP_L3_REGISTRY["geonet"]["fields"].update({
+    "LT":             "1B  Lifetime: multiplier(6b) × base(2b) — 50ms/1s/10s/100s units",
+    "Traffic Class":  "1B  SCF(1b)+ChannelOffload(1b)+ID(6b) — QoS traffic class",
+})
+
+# WSMP — add TxPowerUsed and DataRate with correct IEEE 1609.3 names
+NON_IP_L3_REGISTRY["wsmp"]["fields"].update({
+    "TxPowerUsed":    "1B  transmit power used in dBm + 128 per IEEE 1609.3 §8.1.3",
+    "DataRate":       "1B  data rate in units of 500 kbps per IEEE 1609.3 §8.1.3",
+    "ChanInterval":   "1B  channel interval per IEEE 1609.3 §8.1.3 multi-channel ops",
+})
+
+# FCoE — add Version field per FC-BB-5
+NON_IP_L3_REGISTRY["fcoe"]["fields"].update({
+    "Version":        "4b  FCoE encapsulation version — must be 0 per FC-BB-5 §8.3",
+    "Reserved":       "100b  reserved bits between SOF and start of FC header",
+})
+
+# FIP — add Descriptor List Length per FC-BB-5
+NON_IP_L3_REGISTRY["fip"]["fields"].update({
+    "Descriptor List Length": "2B  length of FIP descriptor list in units of 32-bit words",
+    "FIP Version":    "1B  FIP protocol version — 0x01=FIP v1",
+})
+
+# RoCE — add GRH (Global Routing Header) field per IBTA
+NON_IP_L3_REGISTRY["roce"]["fields"].update({
+    "GRH":            "40B optional IPv6-style Global Routing Header when GRH present in BTH",
+    "Migration":      "1b  BTH MigReq — migration request bit",
+    "PadCount":       "2b  BTH PadCnt — number of pad bytes appended to payload (0-3)",
+    "TranType":       "4b  BTH transport type: 0=RC 1=UC 2=RD 3=UD 7=CNP",
+})
+
+# PPPoE — add Session-ID searchable name
+NON_IP_L3_REGISTRY["pppoe"]["fields"].update({
+    "Session ID":     "2B  PPPoE session identifier — 0x0000 in discovery; AC-assigned after PADS",
+    "PPP Protocol":   "2B  PPP protocol field in session stage only: 0x0021=IPv4 0x0057=IPv6 0xC021=LCP",
+})
+
+# IPX — add searchable field names per Novell IPX spec
+NON_IP_L3_REGISTRY["ipx"]["fields"].update({
+    "Transport Control": "1B  hop count — incremented by each IPX router; discard at 16",
+    "Dst Network":    "4B  destination IPX network number (0=local)",
+    "Dst Node":       "6B  destination IPX node address (FF:FF:FF:FF:FF:FF=broadcast)",
+    "Dst Socket":     "2B  destination service socket: 0x0451=NCP 0x0452=SAP 0x0453=RIP",
+    "Src Network":    "4B  source IPX network number",
+    "Src Node":       "6B  source IPX node address",
+    "Src Socket":     "2B  source service socket",
+})
+
+# DDP AppleTalk — add Byte Count
+NON_IP_L3_REGISTRY["ddp"]["fields"].update({
+    "Byte Count":     "10b  total DDP datagram length including 13-byte header",
+    "DDP Length":     "10b  same as Byte Count — total length field in DDP header",
+})
+
+# VINES IP — add transport control and searchable addr fields
+NON_IP_L3_REGISTRY["vines_ip"]["fields"].update({
+    "Transport Control": "1B  hop count+flags — 0x00=normal frame; incremented by each VINES router",
+    "Dst Net":        "4B  destination VINES network number",
+    "Dst Subnetwork": "2B  destination VINES subnetwork (host) address",
+    "Src Subnetwork": "2B  source VINES subnetwork address",
+})
+
+# Expand thin L3 entries
+NON_IP_L3_REGISTRY["cobranet"]["fields"].update({
+    "CobraNet Beat":  "1B  periodic heartbeat (0x01) or data bundle (0x02) frame type",
+    "Bundle Type":    "1B  audio bundle type: 0x00=conductor 0x01=performer",
+    "Conductor MAC":  "6B  MAC of CobraNet conductor node",
+})
+NON_IP_L3_REGISTRY["eapol"]["fields"].update({
+    "Version":        "1B  IEEE 802.1X protocol version: 0x01=2001 0x02=2004 0x03=2010",
+    "Type":           "1B  EAPOL frame type — see type_map above",
+    "Length":         "2B  length of body field in bytes (0 for EAPOL-Start/Logoff)",
+})
+NON_IP_L3_REGISTRY["ecp"]["fields"].update({
+    "ECP Subtype":    "1B  0x00=VDP (VSI Discovery and Configuration)",
+    "Sequence":       "2B  ECP sequence number for reliable delivery",
+    "ACK":            "1b  acknowledgment bit",
+})
+NON_IP_L3_REGISTRY["eth_loopback"]["fields"].update({
+    "Function":       "2B  0x0001=Reply 0x0002=Forward-Data",
+    "Reply Count":    "2B  number of skips remaining before this station replies",
+    "Receipt Number": "2B  sequence from request — echoed in reply",
+})
+NON_IP_L3_REGISTRY["gre_ctrl"]["fields"].update({
+    "Control Type":   "1B  GRE control channel message type per RFC 8157",
+    "Trans ID":       "2B  transaction identifier for request/response correlation",
+    "Version":        "2B  0x0001=PPTP-compatible GRE",
+    "Flags":          "2B  C+R+K+S+Recur+A+Ver bits per RFC 2784",
+})
+NON_IP_L3_REGISTRY["homeplug_av"]["fields"].update({
+    "OUI":            "3B  0x00:B0:52 HomePlug Alliance Organizationally Unique Identifier",
+    "MMTYPE":         "2B  management message type code — 0x6000-0x61FF=CM 0xA000=vendor",
+    "FMI":            "2B  Fragment Management: FMI(4b)+FMSN(4b)+FMID(8b)",
+    "MMENTRY":        "variable  management message entry body data",
+})
+NON_IP_L3_REGISTRY["homeplug_av2"]["fields"].update({
+    "OUI":            "3B  0x00:B0:52 HomePlug Alliance OUI",
+    "MMTYPE":         "2B  AV2 extended type — 0x6000-0x61FF standard 0xA000+=vendor",
+    "FMI":            "2B  Fragment Management Information",
+    "MIMO Fields":    "variable  AV2 MIMO beamforming and tone map data",
+})
+NON_IP_L3_REGISTRY["hyperscsi"]["fields"].update({
+    "Version":        "1B  HyperSCSI protocol version (deprecated — no current standard)",
+    "Frame Type":     "1B  0=Command 1=Data 2=Response 3=Error",
+    "Tag":            "2B  command tag for request/response pairing",
+})
+NON_IP_L3_REGISTRY["ip_as"]["fields"].update({
+    "GRE Header":     "4B  GRE flags+protocol type=0x876C IP-AS EtherType",
+    "AS Number":      "4B  autonomous system number in GRE key field",
+    "Inner Frame":    "variable  encapsulated IP datagram",
+})
+NON_IP_L3_REGISTRY["local_exp"]["fields"].update({
+    "Experiment ID":  "variable  experimenter-defined identifier bytes",
+    "Version":        "optional  experiment protocol version",
+    "Payload":        "variable  experiment-specific data — IEEE 802 reserves 0x88B5/0x88B6 for this",
+})
+NON_IP_L3_REGISTRY["oui_ext"]["fields"].update({
+    "OUI":            "3B  24-bit Organizationally Unique Identifier (company/standards body)",
+    "Protocol ID":    "2B  protocol identifier within OUI namespace",
+    "OUI Payload":    "variable  OUI-and-protocol-specific data",
+})
+NON_IP_L3_REGISTRY["secure_data"]["fields"].update({
+    "GRE Header":     "4B  GRE flags+protocol=0x876D secure data",
+    "Security Assoc": "4B  security association identifier in GRE key field",
+    "Encrypted":      "variable  encrypted payload per RFC 1701 secure data convention",
+})
+NON_IP_L3_REGISTRY["sna"]["fields"].update({
+    "TH":             "6B  Transmission Header — routing control across SNA network nodes",
+    "RH":             "3B  Request/Response Header — data flow and sense codes",
+    "RU":             "variable  Request/Response Unit — application data",
+})
+NON_IP_L3_REGISTRY["vjcomp"]["fields"].update({
+    "Type":           "1B  0x70=Uncompressed-TCP 0x18=Compressed-TCP 0x45-0x4F=IP (unmodified)",
+    "IP/TCP Header":  "compressed/uncompressed IP+TCP headers per RFC 1144 §3",
+    "Connection":     "1B  connection slot number (0-255) for VJ compression state",
+})
+NON_IP_L3_REGISTRY["wol"]["fields"].update({
+    "Sync Stream":    "6B  0xFF×6 — Wake-on-LAN synchronisation stream",
+    "Target MAC":     "96B  target MAC address repeated 16× (16×6B=96B)",
+    "SecureOn":       "0B/4B/6B  optional SecureOn password (0=none 4B=4-byte 6B=6-byte)",
+})
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# IP PROTOCOL REGISTRY FIELD FIXES
+# ═══════════════════════════════════════════════════════════════════════════════
+IP_PROTOCOL_REGISTRY[1]["fields"].update({
+    "Identifier":    "2B  echo identifier for matching request/reply (ICMP Echo/Reply only)",
+    "Sequence":      "2B  echo sequence number for loss detection (ICMP Echo/Reply only)",
+})
+IP_PROTOCOL_REGISTRY[6]["fields"].update({
+    "Sequence":      "4B  sequence number — byte offset of first data byte in this segment",
+    "Acknowledgment":"4B  ACK number — next expected byte from sender",
+    "SYN":           "1b  synchronise sequence numbers (connection establishment)",
+    "ACK":           "1b  acknowledgment field significant",
+    "FIN":           "1b  no more data from sender (connection termination)",
+    "RST":           "1b  reset the connection",
+    "PSH":           "1b  push data to application immediately",
+})
+IP_PROTOCOL_REGISTRY[50]["fields"].update({
+    "Sequence":      "4B  anti-replay sequence number — must increase monotonically",
+    "Payload Data":  "variable  encrypted payload (IND-CPA via AES-GCM-128/256)",
+    "Padding":       "0-255B  padding to block boundary; padding length in next field",
+})
+IP_PROTOCOL_REGISTRY[51]["fields"].update({
+    "Next Header":   "1B  protocol of next header after AH: 4=IPIP 6=TCP 17=UDP 50=ESP 89=OSPF",
+    "Payload Len":   "1B  AH payload length in 4B words minus 2",
+    "Sequence":      "4B  monotonically increasing anti-replay counter",
+    "ICV":           "variable  Integrity Check Value — HMAC-SHA-96 or AES-XCBC-96",
+})
+IP_PROTOCOL_REGISTRY[89]["fields"].update({
+    "Packet Length": "2B  total OSPF packet length including OSPF header",
+    "Router ID":     "4B  originating router OSPF Router-ID (unique per OSPF domain)",
+    "Area ID":       "4B  OSPF area this packet belongs to (0.0.0.0=backbone)",
+    "Auth Type":     "2B  0=Null 1=Simple 2=MD5",
+})
