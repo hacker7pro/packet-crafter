@@ -5558,10 +5558,10 @@ def print_ipv4_l4_menu():
     print(f"  {C.SEP_C}  {'─'*70}{C.RESET}")
     for num, info in sorted(ip_protos.items()):
         l4c = info.get('l4_proto') or '—'
-        sc  = C.PASS_ if info['status'] == 'Active' else C.DIM
-        print(f"  {sc}  {num:>5}{C.RESET}  {C.L3}{info['name']:<18}{C.RESET}  "
+        sc  = C.PASS_ if info.get('status') == 'Active' else C.DIM
+        print(f"  {sc}  {num:>5}{C.RESET}  {C.L3}{info.get('name',''):<18}{C.RESET}  "
               f"{C.L4}{l4c:<10}{C.RESET}  "
-              f"{C.DIM}{info['category']:<10}  {info.get('usage','')[:35]}{C.RESET}")
+              f"{C.DIM}{info.get('category',''):<10}  {info.get('usage','')[:35]}{C.RESET}")
 
     # ── Selectable options with detail ─────────────────────────────────────
     print(f"\n  {C.SECT}{C.BOLD}▌ SELECTABLE L4 OPTIONS  (fully buildable){C.RESET}")
